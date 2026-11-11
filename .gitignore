@@ -1,0 +1,7 @@
+# GNUstep build products
+/obj/
+/GTK4Native.theme/
+
+# Test products
+/build/
+*.d
