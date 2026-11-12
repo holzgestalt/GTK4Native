@@ -18,7 +18,17 @@ clang GTK4Renderer.c renderer-test.c -o "$test_build_dir/renderer-test" \
   $(pkg-config --cflags --libs gtk4)
 clang $(gnustep-config --objc-flags) integration-test.m \
   -o "$test_build_dir/integration-test" $(gnustep-config --gui-libs)
+clang $(gnustep-config --objc-flags) fallback-test.m \
+  -o "$test_build_dir/fallback-test" $(gnustep-config --gui-libs)
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) native-menu-test.m \
+  -o "$test_build_dir/native-menu-test" $(gnustep-config --gui-libs) \
+  $(pkg-config --libs gtk4-x11) -ldl
 for theme in Adwaita Adwaita:dark; do
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/renderer-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
+  GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
 done
+GDK_BACKEND=wayland WAYLAND_DISPLAY=gnustep-test-unavailable \
+  xvfb-run -a timeout 15s "$test_build_dir/fallback-test"
+# With no explicit GTK selection, the theme must match the AppKit X11 backend.
+env -u GDK_BACKEND xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"

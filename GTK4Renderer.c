@@ -18,6 +18,45 @@ static void gtk4_snapshot_host_class_init(GTK4SnapshotHostClass *klass)
   widget->unmap = base->unmap;
   g_type_class_unref(base);
 }
+/* Host GTK's generated popover contents in an ordinary widget, keeping the
+ * native popover/contents/menu CSS ancestry without a GdkPopup surface. The
+ * contents are returned to their source before either widget is destroyed. */
+typedef struct { GtkWidget parent; } GTK4SnapshotMenu;
+typedef struct { GtkWidgetClass parent; } GTK4SnapshotMenuClass;
+G_DEFINE_TYPE(GTK4SnapshotMenu, gtk4_snapshot_menu, GTK_TYPE_WIDGET)
+static void gtk4_snapshot_menu_init(GTK4SnapshotMenu *self) { (void)self; }
+static void gtk4_snapshot_menu_measure(GtkWidget *widget, GtkOrientation orientation,
+  int for_size, int *minimum, int *natural, int *min_baseline, int *nat_baseline)
+{
+  gtk_widget_measure(gtk_widget_get_first_child(widget), orientation, for_size,
+                    minimum, natural, min_baseline, nat_baseline);
+}
+static void gtk4_snapshot_menu_allocate(GtkWidget *widget, int width, int height, int baseline)
+{
+  gtk_widget_allocate(gtk_widget_get_first_child(widget), width, height, baseline, NULL);
+}
+static void gtk4_snapshot_menu_snapshot(GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  gtk_widget_snapshot_child(widget, gtk_widget_get_first_child(widget), snapshot);
+}
+static void gtk4_snapshot_menu_class_init(GTK4SnapshotMenuClass *klass)
+{
+  GtkWidgetClass *widget = GTK_WIDGET_CLASS(klass);
+  gtk_widget_class_set_css_name(widget, "popover");
+  widget->snapshot = gtk4_snapshot_menu_snapshot;
+  widget->measure = gtk4_snapshot_menu_measure;
+  widget->size_allocate = gtk4_snapshot_menu_allocate;
+}
+static GtkWidget *find_css_node(GtkWidget *widget, const char *name)
+{
+  if (g_str_equal(gtk_widget_get_css_name(widget), name)) return widget;
+  for (GtkWidget *child = gtk_widget_get_first_child(widget); child;
+       child = gtk_widget_get_next_sibling(child)) {
+    GtkWidget *found = find_css_node(child, name);
+    if (found) return found;
+  }
+  return NULL;
+}
 G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 
 gboolean gtk4_renderer_init(GTK4Renderer *r)
@@ -36,6 +75,36 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
   r->entry = gtk_entry_new();
   gtk_fixed_put(GTK_FIXED(box), r->button, 0, 0);
   gtk_fixed_put(GTK_FIXED(box), r->entry, 0, 0);
+  GMenu *model = g_menu_new();
+  g_menu_append(model, "", "snapshot.item");
+  r->menu_source = gtk_popover_menu_new_from_model(G_MENU_MODEL(model));
+  g_object_ref_sink(r->menu_source);
+  r->menu = gtk_widget_get_first_child(r->menu_source);
+  g_object_ref(r->menu);
+  gtk_widget_unparent(r->menu);
+  GtkWidget *menuHost = g_object_new(gtk4_snapshot_menu_get_type(), NULL);
+  char **menuClasses = gtk_widget_get_css_classes(r->menu_source);
+  gtk_widget_set_css_classes(menuHost, (const char **)menuClasses);
+  g_strfreev(menuClasses);
+  gtk_widget_set_parent(r->menu, menuHost);
+  g_object_unref(r->menu);
+  r->menu_item = find_css_node(r->menu, "modelbutton");
+  gtk_fixed_put(GTK_FIXED(box), menuHost, 0, 0);
+  GMenu *barModel = g_menu_new();
+  g_menu_append_submenu(barModel, "", G_MENU_MODEL(model));
+  r->menubar = gtk_popover_menu_bar_new_from_model(G_MENU_MODEL(barModel));
+  r->menubar_item = gtk_widget_get_first_child(r->menubar);
+  gtk_fixed_put(GTK_FIXED(box), r->menubar, 0, 0);
+  r->menu_separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_fixed_put(GTK_FIXED(box), r->menu_separator, 0, 0);
+  GSimpleActionGroup *actions = g_simple_action_group_new();
+  GSimpleAction *action = g_simple_action_new("item", NULL);
+  g_action_map_add_action(G_ACTION_MAP(actions), G_ACTION(action));
+  gtk_widget_insert_action_group(r->window, "snapshot", G_ACTION_GROUP(actions));
+  g_object_unref(action);
+  g_object_unref(actions);
+  g_object_unref(model);
+  g_object_unref(barModel);
   gtk_widget_realize(r->window);
   gtk_widget_set_visible(r->window, TRUE);
   gtk_widget_map(r->window);
@@ -58,8 +127,29 @@ void gtk4_renderer_entry_insets(GTK4Renderer *r, GtkBorder *insets)
                         border.top + padding.top, border.bottom + padding.bottom};
 }
 
+int gtk4_renderer_natural_height(GtkWidget *widget)
+{
+  int minimum, natural;
+  gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, -1, &minimum, &natural, NULL, NULL);
+  return natural;
+}
+gboolean gtk4_renderer_foreground(GtkWidget *widget, GtkStateFlags state, GdkRGBA *color)
+{
+  if (!widget) return FALSE;
+  gtk_widget_set_state_flags(widget, state, TRUE);
+  gtk_widget_get_color(widget, color);
+  return TRUE;
+}
+
 void gtk4_renderer_clear(GTK4Renderer *r)
 {
+  if (r->menu_source) {
+    g_object_ref(r->menu);
+    gtk_widget_unparent(r->menu);
+    gtk_widget_set_parent(r->menu, r->menu_source);
+    g_object_unref(r->menu);
+    g_object_unref(r->menu_source);
+  }
   if (r->window) {
     gtk_window_destroy(GTK_WINDOW(r->window));
     g_object_unref(r->window);

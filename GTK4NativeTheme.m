@@ -1,6 +1,8 @@
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSTheme.h>
+#import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4Renderer.h"
+#import "GTK4NativeMenu.h"
 
 @interface GTK4NativeTheme : GSTheme
 {
@@ -21,6 +23,11 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
 {
   self = [super initWithBundle:bundle];
   if (self) {
+    // Match the actual AppKit backend, without changing standalone renderer
+    // users or overriding an explicit GTK selection/already-open display.
+    if ([GSCurrentServer() isKindOfClass:NSClassFromString(@"XGServer")]
+        && !g_getenv("GDK_BACKEND") && !gdk_display_get_default())
+      gdk_set_allowed_backends("x11,*");
     _available = gtk4_renderer_init(&_renderer);
     if (!_available) NSLog(@"GTK4Native: GTK could not connect to the display; using GNUstep drawing.");
   }
@@ -47,11 +54,11 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
     const char *gtkNames[] = {"theme_bg_color", "theme_fg_color", "theme_base_color",
       "theme_text_color", "theme_fg_color", "theme_selected_bg_color",
       "theme_selected_fg_color", "insensitive_fg_color", "theme_bg_color",
-      "theme_base_color", "theme_selected_bg_color"};
+      "theme_base_color", "theme_selected_bg_color", "theme_base_color"};
     NSString *keys[] = {@"windowBackgroundColor", @"controlTextColor", @"textBackgroundColor",
       @"textColor", @"labelColor", @"selectedTextBackgroundColor",
       @"selectedTextColor", @"disabledControlTextColor", @"controlColor",
-      @"controlBackgroundColor", @"selectedControlColor"};
+      @"controlBackgroundColor", @"selectedControlColor", @"_sourceListBackgroundColor"};
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
       GdkRGBA color;
       if (gtk4_renderer_color(&_renderer, gtkNames[i], &color))
@@ -160,5 +167,92 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
       ([responder isKindOfClass:[NSText class]] && [(NSText *)responder delegate] == view))
     flags |= GTK_STATE_FLAG_FOCUSED | GTK_STATE_FLAG_FOCUS_WITHIN | GTK_STATE_FLAG_FOCUS_VISIBLE;
   return [self paintWidget:_renderer.entry state:flags frame:frame view:view];
+}
+
+- (GtkStateFlags)menuFlagsForCell:(NSMenuItemCell *)cell state:(GSThemeControlState)state
+{
+  if (![cell isEnabled]) return GTK_STATE_FLAG_INSENSITIVE;
+  if (state == GSThemeHighlightedState || state == GSThemeSelectedState ||
+      state == GSThemeHighlightedFirstResponderState || state == GSThemeSelectedFirstResponderState)
+    return GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_SELECTED;
+  return GTK_STATE_FLAG_NORMAL;
+}
+
+- (CGFloat)menuBarHeight
+{
+  return _available ? gtk4_renderer_natural_height(_renderer.menubar) : [super menuBarHeight];
+}
+- (CGFloat)menuItemHeight
+{
+  return _available ? gtk4_renderer_natural_height(_renderer.menu_item) : [super menuItemHeight];
+}
+- (CGFloat)menuSeparatorHeight
+{
+  return _available ? gtk4_renderer_natural_height(_renderer.menu_separator) : [super menuSeparatorHeight];
+}
+- (BOOL)drawsBorderForMenuItemCell:(NSMenuItemCell *)cell state:(GSThemeControlState)state
+                   isHorizontal:(BOOL)horizontal
+{
+  return _available ? NO : [super drawsBorderForMenuItemCell:cell state:state isHorizontal:horizontal];
+}
+- (void)drawBackgroundForMenuView:(NSMenuView *)view withFrame:(NSRect)bounds
+                       dirtyRect:(NSRect)dirty horizontal:(BOOL)horizontal
+{
+  if (_available) {
+    gtk_widget_set_state_flags(_renderer.menubar_item, GTK_STATE_FLAG_NORMAL, TRUE);
+    gtk_widget_set_state_flags(_renderer.menu_item, GTK_STATE_FLAG_NORMAL, TRUE);
+    if ([self paintWidget:horizontal ? _renderer.menubar : _renderer.menu
+                   state:GTK_STATE_FLAG_NORMAL frame:bounds view:view]) return;
+  }
+  [super drawBackgroundForMenuView:view withFrame:bounds dirtyRect:dirty horizontal:horizontal];
+}
+- (void)drawBorderAndBackgroundForMenuItemCell:(NSMenuItemCell *)cell withFrame:(NSRect)frame
+                                      inView:(NSView *)view state:(GSThemeControlState)state
+                                isHorizontal:(BOOL)horizontal
+{
+  if (!_available) {
+    [super drawBorderAndBackgroundForMenuItemCell:cell withFrame:frame inView:view
+                                          state:state isHorizontal:horizontal];
+    return;
+  }
+  GtkStateFlags flags = [self menuFlagsForCell:cell state:state];
+  // The normal menu surface is already drawn by the parent. Native rows may
+  // legitimately have no render node when transparent; never add a stock bevel.
+  if (!(flags & GTK_STATE_FLAG_PRELIGHT)) return;
+  [self paintWidget:horizontal ? _renderer.menubar_item : _renderer.menu_item
+              state:flags frame:frame view:view];
+}
+- (void)drawSeparatorItemForMenuItemCell:(NSMenuItemCell *)cell withFrame:(NSRect)frame
+                                inView:(NSView *)view isHorizontal:(BOOL)horizontal
+{
+  if (!_available || ![self paintWidget:_renderer.menu_separator state:GTK_STATE_FLAG_NORMAL
+                                  frame:frame view:view])
+    [super drawSeparatorItemForMenuItemCell:cell withFrame:frame inView:view isHorizontal:horizontal];
+}
+- (NSColor *)colorNamed:(NSString *)name state:(GSThemeControlState)state
+{
+  if (_available && [name isEqualToString:@"NSMenuItemText"]) {
+    GdkRGBA color;
+    GtkStateFlags flags = state == GSThemeDisabledState ? GTK_STATE_FLAG_INSENSITIVE :
+      ((state == GSThemeHighlightedState || state == GSThemeSelectedState) ?
+        GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_SELECTED : GTK_STATE_FLAG_NORMAL);
+    if (gtk4_renderer_foreground(_renderer.menu_item, flags, &color))
+      return [NSColor colorWithCalibratedRed:color.red green:color.green blue:color.blue alpha:color.alpha];
+  }
+  return [super colorNamed:name state:state];
+}
+- (BOOL)trackMenuView:(NSMenuView *)view withEvent:(NSEvent *)event
+{
+  return _available && GTK4TrackNativeMenu(view, event);
+}
+- (void)rightMouseDisplay:(NSMenu *)menu forEvent:(NSEvent *)event
+{
+  NSPoint point = [[event window] convertBaseToScreen:[event locationInWindow]];
+  if (!_available || !GTK4ShowNativeMenu(menu, NSMakeRect(point.x, point.y, 1, 1), [event window]))
+    [super rightMouseDisplay:menu forEvent:event];
+}
+- (BOOL)displayNativePopUpMenu:(NSMenu *)menu atScreenRect:(NSRect)rect forWindow:(NSWindow *)window
+{
+  return _available && GTK4ShowNativeMenu(menu, rect, window);
 }
 @end

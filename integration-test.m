@@ -73,6 +73,34 @@ int main(void)
   NSCAssert(NSInterfaceStyleForKey(@"NSMenuInterfaceStyle", nil) == NSWindows95InterfaceStyle,
             @"Theme must use the in-window menu layout");
 
+  NSMenu *nativeMenu = [[NSMenu alloc] initWithTitle:@"Renderer test"];
+  [nativeMenu setAutoenablesItems:NO];
+  id firstItem = [nativeMenu addItemWithTitle:@"Open" action:NULL keyEquivalent:@"o"];
+  [firstItem setEnabled:YES];
+  [nativeMenu addItem:[NSMenuItem separatorItem]];
+  id disabledItem = [nativeMenu addItemWithTitle:@"Unavailable" action:NULL keyEquivalent:@""];
+  [disabledItem setEnabled:NO];
+  NSMenuView *menuView = [[NSMenuView alloc] initWithFrame:NSMakeRect(0,0,240,100)];
+  [menuView setHorizontal:NO];
+  [menuView setMenu:nativeMenu];
+  [menuView sizeToFit];
+  [menuView setHighlightedItemIndex:0];
+  NSMenuItemCell *menuCell = [menuView menuItemCellForItemAtIndex:0];
+  NSCAssert(![theme drawsBorderForMenuItemCell:menuCell state:GSThemeHighlightedState isHorizontal:NO],
+            @"GTK menu rows must not receive a GNUstep bevel");
+  NSCAssert([theme menuItemHeight] >= 24 && [theme menuBarHeight] >= 24,
+            @"Menu sizing must come from GTK widgets");
+  NSImage *menuImage = [[NSImage alloc] initWithSize:[menuView bounds].size];
+  [menuImage lockFocus];
+  [menuView drawRect:[menuView bounds]];
+  [menuImage unlockFocus];
+  NSBitmapImageRep *menuBitmap = [NSBitmapImageRep imageRepWithData:[menuImage TIFFRepresentation]];
+  [[menuBitmap representationUsingType:NSPNGFileType properties:@{}]
+    writeToFile:@"/tmp/gnustep-gtk4-menu.png" atomically:YES];
+  [menuImage release];
+  [menuView release];
+  [nativeMenu release];
+
   NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 380, 160)
     styleMask:NSTitledWindowMask | NSClosableWindowMask backing:NSBackingStoreBuffered defer:NO];
   [window setReleasedWhenClosed:NO];

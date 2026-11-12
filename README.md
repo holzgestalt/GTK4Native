@@ -20,7 +20,8 @@ bash scripts/test.sh
 ```
 
 Dependencies: GNUstep Make/Base/GUI, libobjc2 for this setup, Clang, pkg-config,
-and GTK4 development headers. The tests additionally require Xvfb/xvfb-run.
+GTK4 with its X11 development interfaces, and Xext/Shape headers. The tests
+additionally require Xvfb/xvfb-run and libXtst.so.6 for injected input.
 Tests build into the ignored `build/tests/` directory by default; override it
 with `GTK4_TEST_BUILD_DIR=/absolute/path`. Installation uses the active GNUstep
 prefix's theme directory; root access depends on that prefix's permissions.
@@ -32,6 +33,8 @@ The plugin requires these local `libs-gui` commits, or equivalent changes:
 - `d956428e8`: add text-field drawing and content-geometry theme hooks.
 - `dbb650ddc`: repaint the full text field when editing ends.
 
+Real native menus additionally require the optional GSTheme menu-tracking and
+positioned-popup hooks described below.
 The plugin will not work correctly with an unpatched stock GNUstep GUI library.
 The following instructions describe the surrounding development workspace;
 its setup scripts, core checkouts and sample apps are separate from this repo.
@@ -70,7 +73,8 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Window decoration | Desktop/X11 window manager | Native Wayland backend |
 | Checkboxes/radio buttons | AppKit fallback | GTK indicator rendering and state mapping |
 | Sliders/progress/steppers | AppKit fallback | GTK renderers, measurements and interaction states |
-| Combo boxes, menus, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
+| Menus | Real GTK dropdown/context/positioned menus on X11, with native layout, text, checkmarks, separators and nested submenus; menu bar surfaces use snapshots | Native menubar hosting, Wayland attachment, NSPopUpButton lifecycle |
+| Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
 | Scrolling, tables, tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
 | Dialogs | AppKit fallback | Desktop portals for file selection; printing integration |
 
@@ -92,8 +96,7 @@ NSClipView, preventing the clip from obscuring the native background.
 NSTextField invalidates the full control when its editor is removed, clearing
 native focus outlines outside the editor's content rectangle on Tab/blur.
 
-The changes span five files in `src/libs-gui`, with no GTK dependency added to
-libs-gui itself. The theme requires this patched library; rebuild/install
+The drawing and menu hooks add no GTK dependency to libs-gui itself. The theme requires this patched library; rebuild/install
 libs-gui before loading it. The controls do not require application-specific
 subclasses or swizzling. The build script prefers source headers to previously
 installed headers when compiling new theme APIs.
@@ -177,3 +180,118 @@ system settings or the reference app's normal defaults.
 See [LEARNINGS.md](docs/LEARNINGS.md) for setup discoveries, the snapshot-host
 approach, editor transparency, the Tab repaint regression, and suppression of
 duplicate AppKit focus indicators on GTK-drawn buttons.
+
+## Menu snapshots and XIB field defaults
+
+Menus use GtkPopoverMenu-generated contents/model-button rows and a real
+GtkPopoverMenuBar. A non-native snapshot host preserves the popover CSS node
+name and GTK-supplied classes while hosting the generated contents. The contents
+are returned to their original popover before cleanup. No custom CSS or hand-drawn
+menu bevels are used. Snapshots cover normal backgrounds, highlighted rows and
+separators for the AppKit-hosted bar and fallback menus. AppKit retains labels,
+shortcuts and tracking on those fallback paths; native dropdowns use the bridge
+below. Snapshot tests check GTK-derived dimensions and that the snapshot host
+presents no helper surface.
+This uses GTK's generated widget tree and needs validation on other GTK versions.
+
+The shared GNUstep XIB decoder now defaults a bezeled entry's omitted
+NSDrawsBackground value to YES, only for NSTextFieldCell subclasses. Explicit NO
+remains transparent, other cell classes are unaffected, and labels remain
+transparent. This fixes EditGlyphData's Group, Description and Decompose entries
+without changing the original XIBs or allowing the theme to override intentional
+transparent/custom-colored fields.
+
+## Real GTK popup menus on X11
+
+GTK4NativeMenu now converts NSMenu trees into GMenu/GSimpleAction trees and
+presents a real GtkPopoverMenu (with nested submenus). This path supplies GTK's
+actual text, spacing, indicators, separators, tracking and keyboard navigation.
+Menu actions are sent through NSMenu.performActionForItemAtIndex: after GTK's
+input grab and popup windows have been destroyed, preserving the original target,
+sender, notifications and popup selection behavior. Escape/outside dismissal does
+not dispatch an action. AppKit tracking-mode timers continue while GLib runs.
+
+The patched GSTheme API adds optional trackMenuView:withEvent: and
+displayNativePopUpMenu:atScreenRect:forWindow: hooks. Stock themes return NO.
+NSMenuView consults the tracker before taking its AppKit mouse grab; explicitly
+positioned NSMenu popups consult the second hook before showing an AppKit window.
+The GTK theme also handles context menus directly.
+
+The positioning bridge currently needs X11: an unmanaged, empty-shaped GTK anchor
+positions the real GdkPopup beside the AppKit window using the owning X11 client
+window coordinates. It does not rely on compositor opacity or WM placement. The
+bridge verifies the AppKit backend is XGServer before interpreting opaque backend
+handles, and requires an X11 GDK display plus the X Shape extension. The theme
+prefers X11 only when AppKit uses X11, GTK has no display yet and GDK_BACKEND is
+unset; the standalone renderer never selects a backend. Explicit GDK_BACKEND
+settings still win. Unsupported backends/displays and customized GNUstep command,
+alternate or control key mappings retain AppKit tracking. The menu bar itself is still AppKit-hosted and standard
+NSPopUpButton controls retain their existing lifecycle. Native menu-bar hosting,
+Wayland foreign-window attachment and full live menu-model synchronization remain
+separate work.
+
+Tests use libXtst.so.6 (Debian package libxtst6, test-only) to send actual X11
+keyboard and pointer events through the installed theme's GNUstep hooks. They
+verify a real mapped GTK popup, keyboard/pointer selection, Escape cancellation,
+nested submenu navigation, explicitly positioned menus, action dispatch after
+cleanup, and AppKit timers. Both Adwaita light and dark pass.
+
+The bridge waits for the anchor's GdkSurface to map before opening the popup and
+keeps X input focus on the owning AppKit window. The helper is mapped without
+requesting desktop activation; it receives menu keyboard input through a grab
+instead of becoming the focused toplevel. Tests must not repair popup focus. The app regression
+`GNUstep/menu-click-test.m` sends a real XTest click to File in the actual XIB-loaded
+window, then selects New through GTK and checks that a second document exists.
+It runs with the app startup suite. This regression was also run on the GNOME/
+XWayland desktop, where the panel makes NSScreen.frame differ from the X11 root
+height; the bridge and test use owner-relative X11 coordinates instead.
+
+The repeated-open regression runs with GTK4_MENU_FOCUS_TEST=1. It opens File,
+dismisses it with Escape, verifies that tracking has returned to the default
+run-loop mode and that X focus is still the owning app window, then repeats this
+three times. This is included in scripts/test-editglyphdata.sh and has also passed
+on GNOME/XWayland. The old helper-focus/restore-previous-window implementation
+failed this desktop check by returning focus to another application.
+
+### Opening-click and menu-bar handoff
+
+The press which opens a menu leaves an implicit pointer grab on GNUstep's X11
+connection. GTK uses a different connection. Before presenting the popover, the
+bridge now releases the AppKit-side grab through GSDisplayServer.releasemouse and
+synchronizes that connection. GTK then owns its complete seat-grab lifecycle; an
+additional independent XGrabKeyboard is no longer layered on top of GTK.
+
+The app click regression can hold the opening button for a realistic interval
+(GTK4_MENU_PRESS_MS=150). Instant press/release pairs previously hid this failure.
+Held-click coverage now includes File, Edit, Window and Help. The test activates
+its own window so an overlapping instance cannot receive the injected input.
+
+Clicks on another bar heading while a popup is open are handled in the same
+tracking interaction: after GTK dismisses the current popup, the bridge checks the
+bar hit and opens the next menu instead of relying on cross-connection event
+replay. Keyboard dismissal is tracked separately so Escape cannot reopen a menu
+just because the pointer rests over another heading. GTK4_MENU_SWITCH_TEST=1
+checks File-to-Edit switching against the actual GTK model's first item title,
+then Escape with the pointer moved back over File. Both new regressions are in
+scripts/test-editglyphdata.sh and have passed on GNOME/XWayland.
+
+## Shared GNUstep compatibility audit
+
+The default drawing/content hooks return NO/NSZeroRect and the native-menu hooks
+return NO. Existing GSTheme subclasses inherit AppKit behavior. No GTK or X11
+dependencies, theme selection or platform defaults are added to the shared GUI
+library, and libs-back is unchanged. Explicit text-field colors/transparency and
+unsupported controls retain AppKit drawing.
+
+The workspace's `scripts/test-gnustep-compatibility.sh` runs 29 stock-theme
+executables with 169 assertions, including existing menu, toolbar, split-view,
+XIB and table-cell regressions plus accepting/declining custom themes. Tests use
+isolated defaults. `scripts/test-editglyphdata.sh` also starts the complete app
+with `-GSTheme GNUstep` and verifies the original field drawing path.
+
+Theme tests cover light/dark Adwaita, an unavailable explicit GTK display,
+automatic X11 selection and fallback for custom physical modifier mappings.
+Other GNUstep backends and third-party theme bundles have not been run here;
+native Wayland menus, live model updates and complete accelerator customization
+remain future work. See the workspace's LEARNINGS.md for the consolidated audit
+and build commands.
