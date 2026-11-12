@@ -149,15 +149,10 @@ int main(void)
   [window orderOut:nil];
 
   [GSTheme setTheme:[GSTheme loadThemeNamed:@"GNUstep"]];
-  NSCAssert(NSIsEmptyRect([[GSTheme theme] textFieldContentRectForCell:[field cell]
-    frame:[field bounds]]), @"Stock theme must retain the original geometry path");
-  NSTextView *stockEditor = [[NSTextView alloc] initWithFrame:[field bounds]];
-  [[field cell] setUpFieldEditorAttributes:stockEditor];
-  NSCAssert([stockEditor drawsBackground], @"Stock theme must retain opaque editing");
-  [stockEditor release];
+  NSCAssert([GSTheme theme] == theme, @"Runtime switching must retain the built-in provider");
   [window release];
 
-  NSLog(@"GTK4 checks passed: theme load, custom-color fallback, hidden app icon, in-window menus, active editor transparency, native padding, stock-theme editing fallback");
+  NSLog(@"GTK4 checks passed: theme load, custom-color fallback, hidden app icon, in-window menus, active editor transparency, native padding, fixed build-time provider");
   [button release];
   [image release];
   [field release];
