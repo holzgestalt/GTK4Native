@@ -136,6 +136,9 @@ int main(void)
   NSCAssert(!focusOverlayChangesPixels(theme, button),
             @"GTK buttons must not receive a second AppKit dotted focus indicator");
   [button setBezelStyle:NSShadowlessSquareBezelStyle];
+  NSCAssert(!focusOverlayChangesPixels(theme, button),
+            @"Legacy push buttons must use GTK focus rendering automatically");
+  [button setBezelStyle:NSCircularBezelStyle];
   NSCAssert(focusOverlayChangesPixels(theme, button),
             @"Buttons using AppKit fallback must retain their focus indicator");
   [button setBezelStyle:NSRoundedBezelStyle];

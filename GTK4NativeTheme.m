@@ -19,7 +19,198 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
   return CAIRO_STATUS_SUCCESS;
 }
 
+#if GTK_CHECK_VERSION(4, 10, 0)
+typedef struct { BOOL finished; int choice; } GTK4AlertResult;
+static void alertChosen(GObject *source, GAsyncResult *result, gpointer data)
+{
+  GTK4AlertResult *state = data;
+  GError *error = NULL;
+  int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
+  if (!error) state->choice = choice;
+  g_clear_error(&error);
+  state->finished = YES;
+}
+#endif
+
+typedef struct { BOOL finished; NSInteger choice; } GTK4SaveResult;
+static void saveResponse(GtkButton *button, gpointer data)
+{
+  GTK4SaveResult *state = data;
+  state->choice = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "save-response"));
+  state->finished = YES;
+}
+static gboolean cancelSave(GtkWindow *window, gpointer data)
+{
+  GTK4SaveResult *state = data;
+  state->choice = NSAlertAlternateReturn;
+  state->finished = YES;
+  return TRUE;
+}
+static gboolean saveKey(GtkEventControllerKey *controller, guint key, guint code,
+                        GdkModifierType modifiers, gpointer data)
+{
+  if (key != GDK_KEY_Escape) return FALSE;
+  cancelSave(NULL, data);
+  return TRUE;
+}
+
+/* GTK exposes the themed background as a public render node, but has no
+ * public border-radius getter. Read only this window's background (no child
+ * controls), then mirror its top radii onto the bottom corners. */
+static const GskRoundedRect *saveBackgroundOutline(GskRenderNode *node)
+{
+  switch (gsk_render_node_get_node_type(node)) {
+    case GSK_ROUNDED_CLIP_NODE: return gsk_rounded_clip_node_get_clip(node);
+    case GSK_BORDER_NODE: return gsk_border_node_get_outline(node);
+    case GSK_CONTAINER_NODE:
+      for (guint i = 0; i < gsk_container_node_get_n_children(node); i++) {
+        const GskRoundedRect *outline = saveBackgroundOutline(gsk_container_node_get_child(node, i));
+        if (outline) return outline;
+      }
+      break;
+    default: break;
+  }
+  return NULL;
+}
+static void roundSaveCorners(GtkWidget *window, gpointer unused)
+{
+  GtkSnapshot *snapshot = gtk_snapshot_new();
+  GtkStyleContext *style = gtk_widget_get_style_context(window);
+  gtk_snapshot_render_background(snapshot, style, 0, 0, 1024, 1024);
+  GskRenderNode *node = gtk_snapshot_free_to_node(snapshot);
+  if (!node) return;
+  const GskRoundedRect *outline = saveBackgroundOutline(node);
+  if (outline) {
+    graphene_size_t left = outline->corner[GSK_CORNER_TOP_LEFT];
+    graphene_size_t right = outline->corner[GSK_CORNER_TOP_RIGHT];
+    char css[G_ASCII_DTOSTR_BUF_SIZE * 4 + 160];
+    char lx[G_ASCII_DTOSTR_BUF_SIZE], ly[G_ASCII_DTOSTR_BUF_SIZE];
+    char rx[G_ASCII_DTOSTR_BUF_SIZE], ry[G_ASCII_DTOSTR_BUF_SIZE];
+    g_snprintf(css, sizeof(css),
+      "window.document-save-dialog { border-bottom-left-radius: %spx %spx; border-bottom-right-radius: %spx %spx; }",
+      g_ascii_dtostr(lx, sizeof(lx), left.width), g_ascii_dtostr(ly, sizeof(ly), left.height),
+      g_ascii_dtostr(rx, sizeof(rx), right.width), g_ascii_dtostr(ry, sizeof(ry), right.height));
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider, css, -1);
+    gtk_style_context_add_provider(style, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
+  }
+  gsk_render_node_unref(node);
+}
+
 @implementation GTK4NativeTheme
+- (BOOL)usesIndividualDocumentSaveAlerts { return _available; }
+- (BOOL)runNativeDocumentSaveAlertWithTitle:(NSString *)title message:(NSString *)message
+                                  buttons:(NSArray *)buttons result:(NSInteger *)result
+{
+  if (!_available || ![NSThread isMainThread] || [buttons count] != 3) return NO;
+  GTK4SaveResult state = { NO, NSAlertAlternateReturn };
+  GtkWidget *window = gtk_window_new();
+  g_object_ref_sink(window);
+  gtk_window_set_title(GTK_WINDOW(window), [title UTF8String]);
+  gtk_window_set_modal(GTK_WINDOW(window), TRUE);
+  gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+  // A custom titlebar requests GTK client-side decorations. Keep decorations
+  // enabled so the theme owns the frame, shadow and corner treatment, while
+  // hiding the empty titlebar preserves the compact confirmation layout.
+  gtk_window_set_decorated(GTK_WINDOW(window), TRUE);
+  GtkWidget *titlebar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_window_set_titlebar(GTK_WINDOW(window), titlebar);
+  gtk_widget_set_visible(titlebar, FALSE);
+  gtk_widget_add_css_class(window, "document-save-dialog");
+  g_signal_connect(window, "map", G_CALLBACK(roundSaveCorners), NULL);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
+  gtk_widget_set_margin_top(box, 32);
+  gtk_widget_set_margin_bottom(box, 24);
+  gtk_widget_set_margin_start(box, 24);
+  gtk_widget_set_margin_end(box, 24);
+  gtk_window_set_child(GTK_WINDOW(window), box);
+  GtkWidget *heading = gtk_label_new([title UTF8String]);
+  PangoAttrList *attrs = pango_attr_list_new();
+  pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+  pango_attr_list_insert(attrs, pango_attr_scale_new(1.5));
+  gtk_label_set_attributes(GTK_LABEL(heading), attrs);
+  pango_attr_list_unref(attrs);
+  gtk_label_set_wrap(GTK_LABEL(heading), TRUE);
+  gtk_label_set_justify(GTK_LABEL(heading), GTK_JUSTIFY_CENTER);
+  gtk_box_append(GTK_BOX(box), heading);
+  GtkWidget *body = gtk_label_new([message UTF8String]);
+  gtk_label_set_wrap(GTK_LABEL(body), TRUE);
+  gtk_label_set_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
+  gtk_label_set_max_width_chars(GTK_LABEL(body), 48);
+  gtk_label_set_justify(GTK_LABEL(body), GTK_JUSTIFY_CENTER);
+  gtk_box_append(GTK_BOX(box), body);
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_box_set_homogeneous(GTK_BOX(row), TRUE);
+  gtk_widget_set_margin_top(row, 12);
+  gtk_box_append(GTK_BOX(box), row);
+  // GNOME order: Cancel, Discard, Save. Return codes retain AppKit semantics.
+  int indices[] = {1, 2, 0};
+  int codes[] = {NSAlertAlternateReturn, NSAlertOtherReturn, NSAlertDefaultReturn};
+  GtkWidget *save = NULL, *cancel = NULL;
+  for (int i = 0; i < 3; i++) {
+    GtkWidget *button = gtk_button_new_with_label([[buttons objectAtIndex:indices[i]] UTF8String]);
+    gtk_widget_set_size_request(button, 120, 48);
+    gtk_widget_set_hexpand(button, TRUE);
+    if (i == 1) gtk_widget_add_css_class(button, "destructive-action");
+    if (i == 2) { gtk_widget_add_css_class(button, "suggested-action"); save = button; }
+    if (i == 0) cancel = button;
+    g_object_set_data(G_OBJECT(button), "save-response", GINT_TO_POINTER(codes[i]));
+    g_signal_connect(button, "clicked", G_CALLBACK(saveResponse), &state);
+    gtk_box_append(GTK_BOX(row), button);
+  }
+  gtk_window_set_default_widget(GTK_WINDOW(window), save);
+  gtk_window_set_focus(GTK_WINDOW(window), cancel);
+  g_signal_connect(window, "close-request", G_CALLBACK(cancelSave), &state);
+  GtkEventController *keys = gtk_event_controller_key_new();
+  g_signal_connect(keys, "key-pressed", G_CALLBACK(saveKey), &state);
+  gtk_widget_add_controller(window, keys);
+  gtk_window_present(GTK_WINDOW(window));
+  while (!state.finished) {
+    for (int i = 0; i < 64 && g_main_context_pending(NULL); i++)
+      g_main_context_iteration(NULL, FALSE);
+    [[NSRunLoop currentRunLoop] runMode:NSModalPanelRunLoopMode
+                           beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+  }
+  *result = state.choice;
+  gtk_window_destroy(GTK_WINDOW(window));
+  g_object_unref(window);
+  return YES;
+}
+
+- (BOOL)runNativeAlertWithTitle:(NSString *)title message:(NSString *)message
+                      buttons:(NSArray *)buttons defaultButton:(NSInteger)defaultButton
+                 cancelButton:(NSInteger)cancelButton result:(NSInteger *)result
+{
+#if GTK_CHECK_VERSION(4, 10, 0)
+  if (!_available || ![NSThread isMainThread] || ![buttons count]) return NO;
+  GtkAlertDialog *dialog = gtk_alert_dialog_new("%s", [(title ?: @"") UTF8String]);
+  gtk_alert_dialog_set_detail(dialog, [(message ?: @"") UTF8String]);
+  const char **labels = g_new0(const char *, [buttons count] + 1);
+  for (NSUInteger i = 0; i < [buttons count]; i++)
+    labels[i] = [[buttons objectAtIndex:i] UTF8String];
+  gtk_alert_dialog_set_buttons(dialog, labels);
+  g_free(labels);
+  gtk_alert_dialog_set_default_button(dialog, (int)defaultButton);
+  gtk_alert_dialog_set_cancel_button(dialog, (int)cancelButton);
+  gtk_alert_dialog_set_modal(dialog, TRUE);
+  GTK4AlertResult state = { NO, (int)cancelButton };
+  gtk_alert_dialog_choose(dialog, NULL, NULL, alertChosen, &state);
+  while (!state.finished) {
+    for (int i = 0; i < 64 && g_main_context_pending(NULL); i++)
+      g_main_context_iteration(NULL, FALSE);
+    [[NSRunLoop currentRunLoop] runMode:NSModalPanelRunLoopMode
+                           beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+  }
+  *result = state.choice;
+  g_object_unref(dialog);
+  return YES;
+#else
+  return NO;
+#endif
+}
+
+
 - (NSString *)name { return @"GTK4Native"; }
 - (NSDictionary *)infoDictionary
 {
@@ -105,8 +296,23 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
 
 - (BOOL)handlesButtonStyle:(int)style
 {
-  return _available &&
-    (style == NSRoundedBezelStyle || style == NSRegularSquareBezelStyle);
+  if (!_available) return NO;
+  switch (style) {
+    case NSRoundedBezelStyle:
+    case NSRegularSquareBezelStyle:
+    case NSThickSquareBezelStyle:
+    case NSThickerSquareBezelStyle:
+    case NSShadowlessSquareBezelStyle:
+    case NSTexturedSquareBezelStyle:
+    case NSSmallSquareBezelStyle:
+    case NSTexturedRoundedBezelStyle:
+    case NSRoundRectBezelStyle:
+    case NSRecessedBezelStyle:
+    case NSNeXTBezelStyle:
+    case NSPushButtonBezelStyle:
+      return YES;
+    default: return NO;
+  }
 }
 
 - (void)drawButton:(NSRect)frame in:(NSCell *)cell view:(NSView *)view

@@ -315,3 +315,53 @@ display retain GNUstep panels. Completion and legacy sheet callbacks currently
 run after a blocking native modal interaction. Foreign AppKit parent-window
 attachment is not implemented yet. Tests isolate the session bus so a portal
 cannot open a dialog outside the temporary X display.
+
+## Native alerts and automatic button rendering
+
+On GTK 4.10 or newer, the optional GSTheme modal-alert hook routes
+NSRunAlertPanel through GtkAlertDialog. NSDocument's unsaved-changes prompt uses
+the dedicated per-document dialog described below. Save, Cancel, Don't Save and window dismissal retain the original AppKit
+return codes and document-close logic. GTK supplies the alert widgets; the calling
+application/GNUstep supplies the message and translated button text. Older GTK
+versions and other themes retain AppKit alerts. NSAlert objects and sheets still
+use their existing AppKit implementation. Native alerts currently have no foreign
+AppKit parent attachment, as with the file chooser bridge.
+
+Ordinary bordered NSButton push-button bezel styles use GTK rendering automatically
+through the shared theme drawing hook, including legacy NeXT/push styles. Apps do
+not need to replace their buttons. AppKit still owns their text, input and actions.
+Circular, help, disclosure, borderless and icon-specific styles, plus checkboxes
+and radio indicators, retain their specialized AppKit rendering.
+
+The native alert regression exercises all three responses, window dismissal and
+NSDocument close outcomes for cancellation, discard, failed save and successful
+save, in light and dark GTK themes.
+
+### Per-document save confirmation
+
+Unsaved documents use a custom window made from standard GTK4 labels, boxes and
+buttons, with a centered heading/message and equal-width Cancel, Discard, Save
+actions. GTK's destructive-action and suggested-action classes supply the action
+colors from the active theme. No libadwaita, custom CSS, document list or extra
+quit-review alert is used. The message identifies the document. Quitting reviews
+each document using the existing NSDocument save/close logic; cancellation and
+failed saves stop closing. Other providers retain their existing review workflow.
+
+The theme's dedicated document-alert hook uses AppKit return codes; the generic
+alert hook remains separate. German translations of the new text live in the
+GUI library's normal Localizable.strings resources. Set SAVE_ALERT_PREVIEW to a
+PNG path when running native-alert-test to capture the GTK save window.
+
+The save window keeps GTK client-side decorations enabled, with an empty hidden
+custom titlebar to retain the compact layout. GTK supplies the corner shape and
+shadow from the active theme, without a fixed CSS radius. On non-composited X11
+displays GTK uses its solid frame fallback; composited desktops can use rounded
+transparent corners. Both the Xvfb behavior and GNOME/XWayland appearance have
+been checked.
+
+GTK's stock CSD frame may round only the top corners. For the document-save
+window we inspect GTK's rendered window background and mirror its themed top
+radii onto the bottom corners using a window-local style provider. There is no
+hard-coded radius, and other windows are unaffected. Preview regression checks
+verify transparent bottom corners whenever the desktop supplies transparent top
+corners.

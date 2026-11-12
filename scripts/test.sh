@@ -41,3 +41,13 @@ env -u GDK_BACKEND xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
 LC_ALL=de_DE.UTF-8 LANGUAGE=de FILE_PANEL_TEST_LANGUAGE=de \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
   xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
+
+if pkg-config --atleast-version=4.10 gtk4; then
+  clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-alert-test.m \
+    -o "$test_build_dir/native-alert-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
+  for theme in Adwaita Adwaita:dark; do
+    LC_ALL=C LANGUAGE=en GTK_THEME="$theme" \
+      DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
+      xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-alert-test"
+  done
+fi
