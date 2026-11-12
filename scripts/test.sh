@@ -26,7 +26,7 @@ clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) native-menu
 clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-file-panel-test.m \
   -o "$test_build_dir/native-file-panel-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
 for theme in Adwaita Adwaita:dark; do
-  DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
+  LC_ALL=C DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
     GTK_THEME="$theme" xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/renderer-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
@@ -36,3 +36,8 @@ GDK_BACKEND=wayland WAYLAND_DISPLAY=gnustep-test-unavailable \
   xvfb-run -a timeout 15s "$test_build_dir/fallback-test"
 # With no explicit GTK selection, the theme must match the AppKit X11 backend.
 env -u GDK_BACKEND xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
+
+# Check the installed GTK catalog rather than an application translation bundle.
+LC_ALL=de_DE.UTF-8 LANGUAGE=de FILE_PANEL_TEST_LANGUAGE=de \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
+  xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"

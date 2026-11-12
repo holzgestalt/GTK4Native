@@ -9,6 +9,17 @@ static gboolean cancelChooser(gpointer data)
   for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
     GtkWindow *window = g_list_model_get_item(windows, i);
     if (GTK_IS_FILE_CHOOSER(window) && gtk_widget_get_visible(GTK_WIDGET(window))) {
+      GtkWidget *accept = gtk_dialog_get_widget_for_response(GTK_DIALOG(window), GTK_RESPONSE_ACCEPT);
+      assert(GTK_IS_BUTTON(accept));
+      const char *label = gtk_button_get_label(GTK_BUTTON(accept));
+      GtkFileChooserAction action = gtk_file_chooser_get_action(GTK_FILE_CHOOSER(window));
+      GString *plain = g_string_new("");
+      for (const char *c = label; c && *c; c++) if (*c != '_') g_string_append_c(plain, *c);
+      BOOL german = g_strcmp0(g_getenv("FILE_PANEL_TEST_LANGUAGE"), "de") == 0;
+      const char *expected = action == GTK_FILE_CHOOSER_ACTION_SAVE
+        ? (german ? "Speichern" : "Save") : (german ? "Öffnen" : "Open");
+      assert(g_strcmp0(plain->str, expected) == 0);
+      g_string_free(plain, TRUE);
       *(BOOL *)data = YES;
       gtk_dialog_response(GTK_DIALOG(window), GTK_RESPONSE_CANCEL);
       g_object_unref(window);

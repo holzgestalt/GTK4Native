@@ -1,5 +1,6 @@
 #import "GTK4NativeFilePanel.h"
 #include <gtk/gtk.h>
+#include <libintl.h>
 
 /* GtkFileChooserNative can use the desktop portal and otherwise supplies GTK's
  * real chooser. Never emulate accessory views or silently ignore delegates. */
@@ -24,7 +25,10 @@ static NSArray *choose(NSSavePanel *panel, NSString *directory, NSString *name)
   GtkFileChooserAction action = open ? GTK_FILE_CHOOSER_ACTION_OPEN : GTK_FILE_CHOOSER_ACTION_SAVE;
   if (open && [(NSOpenPanel *)panel canChooseDirectories]) action = GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER;
   GtkFileChooserNative *native = gtk_file_chooser_native_new([[panel title] UTF8String],
-    NULL, action, [[panel prompt] UTF8String], "_Cancel");
+    // GNUstep's prompt labels the filename field ("Name:"), not this button.
+    // Use GTK's own catalog so labels follow the same locale as its chooser.
+    NULL, action, dgettext("gtk40", open ? "_Open" : "_Save"),
+    dgettext("gtk40", "_Cancel"));
   GtkFileChooser *chooser = GTK_FILE_CHOOSER(native);
   if (open) gtk_file_chooser_set_select_multiple(chooser, [(NSOpenPanel *)panel allowsMultipleSelection]);
   gtk_file_chooser_set_create_folders(chooser, [panel canCreateDirectories]);
