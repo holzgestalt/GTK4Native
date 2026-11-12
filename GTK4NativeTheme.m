@@ -1,10 +1,11 @@
 #import <AppKit/AppKit.h>
-#import <GNUstepGUI/GSTheme.h>
+#import <GNUstepGUI/GSGNUstepTheme.h>
 #import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4Renderer.h"
 #import "GTK4NativeMenu.h"
+#import "GTK4NativeFilePanel.h"
 
-@interface GTK4NativeTheme : GSTheme
+@interface GTK4NativeTheme : GSGNUstepTheme
 {
   GTK4Renderer _renderer;
   BOOL _available;
@@ -19,6 +20,17 @@ static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsign
 }
 
 @implementation GTK4NativeTheme
+- (NSString *)name { return @"GTK4Native"; }
+- (NSDictionary *)infoDictionary
+{
+  return @{ @"GSThemeDomain": @{
+    @"NSInterfaceStyleDefault": @"NSWindows95InterfaceStyle",
+    @"NSMenuInterfaceStyle": @"NSWindows95InterfaceStyle",
+    @"GSSuppressAppIcon": @YES,
+    @"GSBackHandlesWindowDecorations": @YES } };
+}
+- (Class)openPanelClass { return _available ? [GTK4NativeOpenPanel class] : [super openPanelClass]; }
+- (Class)savePanelClass { return _available ? [GTK4NativeSavePanel class] : [super savePanelClass]; }
 - (id)initWithBundle:(NSBundle *)bundle
 {
   self = [super initWithBundle:bundle];

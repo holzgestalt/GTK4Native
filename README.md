@@ -76,7 +76,7 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Menus | Real GTK dropdown/context/positioned menus on X11, with native layout, text, checkmarks, separators and nested submenus; menu bar surfaces use snapshots | Native menubar hosting, Wayland attachment, NSPopUpButton lifecycle |
 | Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
 | Scrolling, tables, tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
-| Dialogs | AppKit fallback | Desktop portals for file selection; printing integration |
+| Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
 The sample's label and text, control events, field editor, keyboard navigation,
 layout and accessibility remain AppKit implementations. No claim of native GTK
@@ -295,3 +295,18 @@ Other GNUstep backends and third-party theme bundles have not been run here;
 native Wayland menus, live model updates and complete accelerator customization
 remain future work. See the workspace's LEARNINGS.md for the consolidated audit
 and build commands.
+
+## Native file selection
+
+The theme supplies NSOpenPanel/NSSavePanel subclasses through the existing
+GSTheme class hooks. GtkFileChooserNative selects a desktop portal where
+available, otherwise GTK displays its file chooser. File filters, initial
+directory/name, multiple files and folder selection are supported. GTK confirms
+overwrites; the bridge returns the exact confirmed path without adding an
+extension afterward. Suggested save names receive the default extension.
+
+Accessory views, delegates, mixed file/folder selection and explicit hidden-file
+display retain GNUstep panels. Completion and legacy sheet callbacks currently
+run after a blocking native modal interaction. Foreign AppKit parent-window
+attachment is not implemented yet. Tests isolate the session bus so a portal
+cannot open a dialog outside the temporary X display.

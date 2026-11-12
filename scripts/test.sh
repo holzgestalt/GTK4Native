@@ -23,7 +23,11 @@ clang $(gnustep-config --objc-flags) fallback-test.m \
 clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) native-menu-test.m \
   -o "$test_build_dir/native-menu-test" $(gnustep-config --gui-libs) \
   $(pkg-config --libs gtk4-x11) -ldl
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-file-panel-test.m \
+  -o "$test_build_dir/native-file-panel-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
 for theme in Adwaita Adwaita:dark; do
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
+    GTK_THEME="$theme" xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/renderer-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
   GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
