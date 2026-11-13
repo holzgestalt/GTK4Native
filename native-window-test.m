@@ -247,6 +247,21 @@ int main(void)
   assert(delegate->toolbarClicks == 1);
   assert([delegate->toolbarSender isKindOfClass:[NSToolbarItem class]]);
   assert([[[delegate->toolbarSender toolbar] identifier] isEqual:@"native-test"]);
+  // Native controls and the embedded AppKit client are separate X11 focus
+  // owners. Clicking an editor must hand keyboard input back to the child.
+  point = [field convertPoint:NSMakePoint(80,15) toView:nil];
+  XTranslateCoordinates(display,view->_child,DefaultRootWindow(display),
+    lround(point.x),lround([window frame].size.height-point.y),&px,&py,&ignored);
+  motion(display,-1,px,py,CurrentTime);
+  release = [NSTimer timerWithTimeInterval:.08 target:delegate selector:@selector(releasePointer:) userInfo:nil repeats:NO];
+  [[NSRunLoop currentRunLoop] addTimer:release forMode:NSEventTrackingRunLoopMode];
+  [[NSRunLoop currentRunLoop] addTimer:release forMode:NSDefaultRunLoopMode];
+  button(display,1,True,CurrentTime); XFlush(display); pump(.2);
+  Window focus; int revert; XGetInputFocus(display,&focus,&revert);
+  assert(focus == view->_child && gtk_root_get_focus(GTK_ROOT(view->_host)) == NULL);
+  key(display,XKeysymToKeycode(display,XK_c),True,CurrentTime);
+  key(display,XKeysymToKeycode(display,XK_c),False,CurrentTime); XFlush(display); pump(.2);
+  assert([[[window fieldEditor:NO forObject:field] string] containsString:@"c"]);
   NSSize withToolbar = [[window contentView] frame].size;
   [toolbar setVisible:NO]; pump(0.2);
   assert(!view->_nativeToolbar);

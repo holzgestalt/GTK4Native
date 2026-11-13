@@ -303,10 +303,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   BOOL embedded = x >= 0 && x < gtk_widget_get_width(view->_host)
     && y >= bounds.origin.y && y < gtk_widget_get_height(view->_host);
   if (embedded && type == GDK_BUTTON_PRESS && view->_child) {
-    gtk_root_set_focus(GTK_ROOT(view->_host), NULL);
-    Display *display = (Display *)[GSServerForWindow([view window]) serverDevice];
-    XSetInputFocus(display, view->_child, RevertToParent, CurrentTime);
-    XFlush(display);
+    [view focusAppKitContent];
   }
   return embedded;
 }
@@ -732,6 +729,18 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   }
   XFlush(display);
   return YES;
+}
+- (void)focusAppKitContent
+{
+  if (!_child || !gtk_widget_get_mapped(_host) || !nativeToolbarHasFocus(self)) return;
+  if (![window isKeyWindow] && !gtk_window_is_active(GTK_WINDOW(_host))) return;
+  if ([NSApp modalWindow] && [NSApp modalWindow] != window && ![window worksWhenModal]) return;
+  Display *display = (Display *)[GSServerForWindow(window) serverDevice];
+  XWindowAttributes attributes;
+  if (!XGetWindowAttributes(display,_child,&attributes) || attributes.map_state != IsViewable) return;
+  gtk_root_set_focus(GTK_ROOT(_host),NULL);
+  XSetInputFocus(display,_child,RevertToParent,CurrentTime);
+  XFlush(display);
 }
 - (BOOL)miniaturizeNativeWindow
 {

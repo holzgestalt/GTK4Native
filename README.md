@@ -589,3 +589,20 @@ server` exception when a theme is initialized early. The regression requests
 and activates the theme before NSApplication exists, then verifies connected
 screens, backend choice, scaling and native window creation at 1x, 2x and an
 explicit scale override. The standalone C renderer's initialization is unchanged.
+
+### Keyboard focus between native controls and AppKit content
+
+GTK owns focus for the sidebar and native toolbar controls; the embedded backend
+child owns focus while editing AppKit content. Pointer events sent to that X11
+child bypass the GTK host's event controllers. NSWindow therefore notifies its
+decorator when it receives content mouse-down events and when a content view
+becomes first responder, including an unchanged first responder. The default
+`focusAppKitContent` hook is a no-op. GTK4Native clears its GTK focus widget and
+moves X11 focus to the mapped AppKit child, respecting modal and inactive windows.
+Native sidebar navigation and toolbar search continue to own GTK focus until an
+AppKit content interaction requests the handoff.
+
+The native-window regression tests real toolbar-to-editor clicks and typing.
+EditGlyphData's full-file regression also types in a detail field after native
+sidebar navigation and after adding a glyph with the real native plus button,
+and verifies programmatic refocusing of an already active AppKit field editor.
