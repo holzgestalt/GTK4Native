@@ -6,6 +6,7 @@ typedef struct {
   GtkWidget *window;
   GtkWidget *button;
   GtkWidget *entry;
+  GtkWidget *scrollbars[2];
   GtkWidget *menu;
   GtkWidget *menu_source;
   GtkWidget *menu_item;
@@ -13,6 +14,16 @@ typedef struct {
   GtkWidget *menubar_item;
   GtkWidget *menu_separator;
 } GTK4Renderer;
+/* A real GtkScrollbar supplies CSS, minimum thumb size and range geometry.
+ * Index 0 is horizontal, 1 is vertical. All dimensions are GTK logical units. */
+typedef struct {
+  graphene_rect_t trough;
+  graphene_rect_t thumb;
+} GTK4ScrollbarGeometry;
+int gtk4_renderer_scrollbar_width(GTK4Renderer *renderer);
+gboolean gtk4_renderer_scrollbar_prepare(GTK4Renderer *renderer, gboolean horizontal,
+  double value, double proportion, gboolean enabled, gboolean pressed,
+  int width, int height, GTK4ScrollbarGeometry *geometry);
 gboolean gtk4_renderer_init(GTK4Renderer *renderer);
 gboolean gtk4_renderer_color(GTK4Renderer *renderer, const char *name, GdkRGBA *color);
 void gtk4_renderer_entry_insets(GTK4Renderer *renderer, GtkBorder *insets);

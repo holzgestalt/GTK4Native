@@ -5,13 +5,18 @@
 #import "GTK4NativeMenu.h"
 #import "GTK4NativeFilePanel.h"
 #import "GTK4NativeWindow.h"
+#import "GTK4NativeTable.h"
 
 @interface GTK4NativeTheme : GSGNUstepTheme
 {
   GTK4Renderer _renderer;
   BOOL _available;
+  BOOL _backendInitializationPending;
   NSColorList *_nativeColors;
+  NSTimer *_desktopTimer;
+  CGFloat _desktopScale;
 }
+- (void)initializeNativeBackend;
 @end
 
 static cairo_status_t appendPNG(void *closure, const unsigned char *data, unsigned int size)
@@ -233,11 +238,23 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 - (NSString *)name { return @"GTK4Native"; }
 - (NSDictionary *)infoDictionary
 {
-  return @{ @"GSThemeDomain": @{
+  NSMutableDictionary *domain=[NSMutableDictionary dictionaryWithDictionary:@{
     @"NSInterfaceStyleDefault": @"NSWindows95InterfaceStyle",
     @"NSMenuInterfaceStyle": @"NSWindows95InterfaceStyle",
     @"GSSuppressAppIcon": @YES,
-    @"GSBackHandlesWindowDecorations": @YES } };
+    @"GSBackHandlesWindowDecorations": @YES }];
+  // AppKit's X11 backend reports 72 DPI unconditionally. Use GDK's desktop
+  // scale as a theme default before AppKit lays out windows and loads fonts.
+  // Explicit GSScaleFactor values in argument/app/global domains still win.
+  if (_available && [GSCurrentServer() isKindOfClass:NSClassFromString(@"XGServer")]) {
+    GListModel *monitors=gdk_display_get_monitors(gdk_display_get_default());
+    GdkMonitor *monitor=g_list_model_get_item(monitors,0);
+    if (monitor) {
+      [domain setObject:@(MAX(1,gdk_monitor_get_scale_factor(monitor))) forKey:@"GSScaleFactor"];
+      g_object_unref(monitor);
+    }
+  }
+  return @{ @"GSThemeDomain": domain };
 }
 - (Class)openPanelClass { return _available ? [GTK4NativeOpenPanel class] : [super openPanelClass]; }
 - (Class)savePanelClass { return _available ? [GTK4NativeSavePanel class] : [super savePanelClass]; }
@@ -245,19 +262,80 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 {
   self = [super initWithBundle:bundle];
   if (self) {
-    // Match the actual AppKit backend, without changing standalone renderer
-    // users or overriding an explicit GTK selection/already-open display.
-    if ([GSCurrentServer() isKindOfClass:NSClassFromString(@"XGServer")]
-        && !g_getenv("GDK_BACKEND") && !gdk_display_get_default())
-      gdk_set_allowed_backends("x11,*");
-    _available = gtk4_renderer_init(&_renderer);
-    if (!_available) NSLog(@"GTK4Native: GTK could not connect to the display; using GNUstep drawing.");
+    _backendInitializationPending = YES;
+    if (GSCurrentServer()) [self initializeNativeBackend];
   }
   return self;
 }
+- (void)initializeNativeBackend
+{
+  if (!_backendInitializationPending || !GSCurrentServer()) return;
+  _backendInitializationPending = NO;
+  // Select GTK's backend only once AppKit's selected backend is known.
+  // An explicitly requested GTK backend still wins.
+  if ([GSCurrentServer() isKindOfClass:NSClassFromString(@"XGServer")]
+      && !g_getenv("GDK_BACKEND") && !gdk_display_get_default())
+    gdk_set_allowed_backends("x11,*");
+  _available = gtk4_renderer_init(&_renderer);
+  if (!_available) NSLog(@"GTK4Native: GTK could not connect to the display; using GNUstep drawing.");
+}
+- (void)displayServerDidConnect
+{
+  if (_backendInitializationPending) {
+    [self initializeNativeBackend];
+    // Publish native defaults, including desktop scale, before AppKit creates
+    // its first graphics context and loads fonts.
+    [self activate];
+  }
+}
 
+- (void)activate
+{
+  [super activate];
+  _desktopScale=GSCurrentServer() ? [[NSScreen mainScreen] userSpaceScaleFactor] : 0;
+  if (_available && !_desktopTimer) {
+    _desktopTimer=[NSTimer timerWithTimeInterval:0.25 target:self
+      selector:@selector(synchronizeDesktopScale:) userInfo:nil repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:_desktopTimer forMode:NSRunLoopCommonModes];
+  }
+}
+- (void)synchronizeDesktopScale:(id)sender
+{
+  if (!GSCurrentServer()) return;
+  // GDK must receive XSettings/monitor events even while AppKit owns the loop.
+  for (int i=0;i<64 && g_main_context_pending(NULL);i++)
+    g_main_context_iteration(NULL,FALSE);
+  NSUserDefaults *defs=[NSUserDefaults standardUserDefaults];
+  NSMutableDictionary *domain=[[[defs volatileDomainForName:@"GSThemeDomain"] mutableCopy] autorelease];
+  NSNumber *factor=[[[self infoDictionary] objectForKey:@"GSThemeDomain"] objectForKey:@"GSScaleFactor"];
+  if (!factor || !domain) return;
+  if ([[domain objectForKey:@"GSScaleFactor"] isEqual:factor]) return;
+  CGFloat oldScale=_desktopScale;
+  [domain setObject:factor forKey:@"GSScaleFactor"];
+  [defs removeVolatileDomainForName:@"GSThemeDomain"];
+  [defs setVolatileDomain:domain forName:@"GSThemeDomain"];
+  CGFloat newScale=[[NSScreen mainScreen] userSpaceScaleFactor];
+  if (fabs(newScale-oldScale)<0.001) return;
+  _desktopScale=newScale;
+  for (NSWindow *window in [NSApp windows]) {
+    if ([window styleMask] & NSUnscaledWindowMask) continue;
+    NSView *content=[window contentView];
+    NSSize logicalSize=[content bounds].size;
+    NSView *root=[content superview];
+    BOOL autoresizes=[root autoresizesSubviews];
+    [root setAutoresizesSubviews:NO];
+    @try {
+      [window setContentSize:logicalSize];
+      [root setNeedsDisplay:YES];
+      [content setNeedsLayout:YES];
+      [content layoutSubtreeIfNeeded];
+      [window invalidateCursorRectsForView:content];
+    } @finally { [root setAutoresizesSubviews:autoresizes]; }
+  }
+}
 - (void)dealloc
 {
+  [_desktopTimer invalidate];
   [_nativeColors release];
   gtk4_renderer_clear(&_renderer);
   [super dealloc];
@@ -295,7 +373,10 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
              frame:(NSRect)frame view:(NSView *)view
 {
   if (!_available || NSIsEmptyRect(frame)) return NO;
-  CGFloat factor = [[view window] backingScaleFactor];
+  // GNUstep scales its window view transform using userSpaceScaleFactor;
+  // backingScaleFactor alone is currently always 1 on this backend.
+  CGFloat factor = MAX([[view window] userSpaceScaleFactor],
+                       [[view window] backingScaleFactor]);
   int scale = MAX(1, (int)ceil(factor));
   cairo_surface_t *surface = gtk4_renderer_draw(widget, state,
     (int)ceil(frame.size.width), (int)ceil(frame.size.height), scale);
@@ -311,6 +392,72 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
           fraction:1.0 respectFlipped:YES hints:nil];
   [image release];
   return YES;
+}
+
+- (float)defaultScrollerWidth
+{
+  if (!_available) return [super defaultScrollerWidth];
+  int width = gtk4_renderer_scrollbar_width(&_renderer);
+  return width > 0 ? width : [super defaultScrollerWidth];
+}
+
+- (BOOL)prepareScroller:(NSScroller *)scroller geometry:(GTK4ScrollbarGeometry *)geometry
+{
+  if (!_available) return NO;
+  NSRect bounds = [scroller bounds];
+  return gtk4_renderer_scrollbar_prepare(&_renderer, NSWidth(bounds) > NSHeight(bounds),
+    [scroller doubleValue], [scroller knobProportion], [scroller isEnabled],
+    [scroller hitPart] == NSScrollerKnob, ceil(NSWidth(bounds)), ceil(NSHeight(bounds)), geometry);
+}
+
+- (BOOL)getScrollerRect:(NSRect *)rect forPart:(NSScrollerPart)part
+            inScroller:(NSScroller *)scroller
+{
+  GTK4ScrollbarGeometry geometry;
+  if (![self prepareScroller:scroller geometry:&geometry]) return NO;
+  graphene_rect_t r;
+  switch (part) {
+    case NSScrollerKnob: r = geometry.thumb; break;
+    case NSScrollerKnobSlot: r = geometry.trough; break;
+    // GTK4 has no stepper arrows. Trough clicks use NSScroller's slot path,
+    // which consults scrollerScrollsByPageForScroller: before scrolling.
+    default: *rect = NSZeroRect; return YES;
+  }
+  NSRect bounds = [scroller bounds];
+  *rect = NSMakeRect(NSMinX(bounds) + r.origin.x, NSMinY(bounds) + r.origin.y,
+                     r.size.width, r.size.height);
+  return YES;
+}
+
+- (BOOL)drawNativeScroller:(NSScroller *)scroller dirtyRect:(NSRect)rect
+{
+  GTK4ScrollbarGeometry geometry;
+  if (![self prepareScroller:scroller geometry:&geometry]) return NO;
+  BOOL horizontal = NSWidth([scroller bounds]) > NSHeight([scroller bounds]);
+  GtkStateFlags state = [scroller isEnabled] ? GTK_STATE_FLAG_NORMAL : GTK_STATE_FLAG_INSENSITIVE;
+  if ([scroller isEnabled] && [scroller hitPart] == NSScrollerKnob)
+    state |= GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT;
+  // Snapshot the complete GTK widget, not separately stretched CSS pieces.
+  // AppKit's dirty-region clip still limits the final paint.
+  [[NSColor controlBackgroundColor] set];
+  NSRectFill(NSIntersectionRect(rect, [scroller bounds]));
+  return [self paintWidget:_renderer.scrollbars[horizontal ? 0 : 1]
+                    state:state frame:[scroller bounds] view:scroller];
+}
+
+- (id<GSNativeTableView>)nativeTableViewForTableView:(NSTableView *)table
+{
+  return _available ? [GTK4NativeTable peerForTable:table] : nil;
+}
+
+- (BOOL)scrollerScrollsByPageForScroller:(NSScroller *)scroller
+{
+  if (!_available || [[NSUserDefaults standardUserDefaults]
+                       objectForKey:@"GSScrollerScrollsByPage"])
+    return [super scrollerScrollsByPageForScroller:scroller];
+  gboolean warps = FALSE;
+  g_object_get(gtk_settings_get_default(), "gtk-primary-button-warps-slider", &warps, NULL);
+  return !warps;
 }
 
 - (BOOL)handlesButtonStyle:(int)style

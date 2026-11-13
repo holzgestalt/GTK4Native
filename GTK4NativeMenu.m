@@ -1,6 +1,7 @@
 #import "GTK4NativeMenu.h"
 #import <GNUstepGUI/GSDisplayServer.h>
 #include <gtk/gtk.h>
+#include <math.h>
 #include <gdk/x11/gdkx.h>
 #include <X11/extensions/shape.h>
 
@@ -191,7 +192,6 @@ static BOOL GTK4RunNativeMenu(NSMenu *menu, NSRect rect, NSWindow *owner, BOOL *
   g_object_ref_sink(session->anchor);
   gtk_window_set_decorated(GTK_WINDOW(session->anchor), FALSE);
   gtk_window_set_resizable(GTK_WINDOW(session->anchor), FALSE);
-  gtk_window_set_default_size(GTK_WINDOW(session->anchor), MAX(1, (int)rect.size.width), 1);
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_window_set_child(GTK_WINDOW(session->anchor), box);
   session->popover = gtk_popover_menu_new_from_model_full(NULL, GTK_POPOVER_MENU_NESTED);
@@ -211,6 +211,10 @@ static BOOL GTK4RunNativeMenu(NSMenu *menu, NSRect rect, NSWindow *owner, BOOL *
   g_signal_connect(session->popover, "closed", G_CALLBACK(nativeMenuClosed), session);
   gtk_widget_realize(session->anchor);
   GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(session->anchor));
+  // AppKit screen/base coordinates are X11 pixels; GTK sizes are logical.
+  int gtkScale=MAX(1,gdk_surface_get_scale_factor(surface));
+  int anchorWidth=MAX(1,(int)ceil(rect.size.width/gtkScale));
+  gtk_window_set_default_size(GTK_WINDOW(session->anchor), anchorWidth, 1);
   Display *xdisplay = gdk_x11_display_get_xdisplay(display);
   Window xid = gdk_x11_surface_get_xid(surface);
   Window ownerXid = (Window)[GSServerForWindow(owner) windowDevice:[owner windowNumber]];
@@ -263,7 +267,7 @@ static BOOL GTK4RunNativeMenu(NSMenu *menu, NSRect rect, NSWindow *owner, BOOL *
     NSLog(@"GTK native anchor: X11=(%d,%d) mapped=%d parent=0x%lx owner=0x%lx", x, y,
       gdk_surface_get_mapped(surface),(unsigned long)transient,(unsigned long)ownerXid);
   }
-  GdkRectangle pointing = {0, 0, MAX(1, (int)rect.size.width), 1};
+  GdkRectangle pointing = {0, 0, anchorWidth, 1};
   gtk_popover_set_pointing_to(GTK_POPOVER(session->popover), &pointing);
   // The opening press creates an implicit grab on AppKit's X connection.
   // GTK uses another connection and cannot acquire its popup grab until that

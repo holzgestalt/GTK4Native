@@ -71,6 +71,59 @@ int main(void)
   cairo_surface_destroy(disabled);
   cairo_surface_destroy(entry);
   cairo_surface_destroy(plainEntry);
+  int thickness = gtk4_renderer_scrollbar_width(&r);
+  g_assert_cmpint(thickness, >, 0);
+  for (int axis = 0; axis < 2; axis++) {
+    gboolean horizontal = axis == 0;
+    int width = horizontal ? 240 : thickness;
+    int height = horizontal ? thickness : 240;
+    GTK4ScrollbarGeometry first, last, small, large;
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, 0, .25, TRUE, FALSE,
+      width, height, &first));
+    cairo_surface_t *firstImage = gtk4_renderer_draw(r.scrollbars[axis], 0, width, height, 1);
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, 1, .25, TRUE, FALSE,
+      width, height, &last));
+    cairo_surface_t *lastImage = gtk4_renderer_draw(r.scrollbars[axis], 0, width, height, 1);
+    g_assert_true(fingerprint(firstImage) != fingerprint(lastImage));
+    float firstPosition = horizontal ? first.thumb.origin.x : first.thumb.origin.y;
+    float lastPosition = horizontal ? last.thumb.origin.x : last.thumb.origin.y;
+    g_assert_cmpfloat(lastPosition, >, firstPosition);
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, .5, .001, TRUE, FALSE,
+      width, height, &small));
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, .5, .8, TRUE, FALSE,
+      width, height, &large));
+    float smallLength = horizontal ? small.thumb.size.width : small.thumb.size.height;
+    float largeLength = horizontal ? large.thumb.size.width : large.thumb.size.height;
+    g_assert_cmpfloat(smallLength, >, 0);
+    g_assert_cmpfloat(largeLength, >, smallLength);
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, .5, .25, TRUE, FALSE,
+      width, height, &small));
+    cairo_surface_t *resting = gtk4_renderer_draw(r.scrollbars[axis], 0, width, height, 1);
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, .5, .25, TRUE, TRUE,
+      width, height, &small));
+    cairo_surface_t *dragging = gtk4_renderer_draw(r.scrollbars[axis],
+      GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT, width, height, 1);
+    g_assert_true(fingerprint(resting) != fingerprint(dragging));
+    uint64_t restingHash = fingerprint(resting);
+    cairo_surface_destroy(resting); cairo_surface_destroy(dragging);
+    cairo_surface_t *scaled = gtk4_renderer_draw(r.scrollbars[axis], 0, width, height, 2);
+    g_assert_cmpint(cairo_image_surface_get_width(scaled), ==, width * 2);
+    g_assert_cmpint(cairo_image_surface_get_height(scaled), ==, height * 2);
+    g_assert_true(gtk4_renderer_scrollbar_prepare(&r, horizontal, .5, .25, FALSE, FALSE,
+      width, height, &small));
+    cairo_surface_t *disabledBar = gtk4_renderer_draw(r.scrollbars[axis], GTK_STATE_FLAG_INSENSITIVE,
+      width, height, 1);
+    g_assert_true(fingerprint(disabledBar) != restingHash);
+    g_assert_false(gtk_widget_is_sensitive(r.scrollbars[axis]));
+    g_assert_false(gtk4_renderer_scrollbar_prepare(&r, horizontal, 0, .25, TRUE, FALSE,
+      0, height, &small));
+    cairo_surface_write_to_png(lastImage, horizontal ? "/tmp/gtk4-scrollbar-horizontal.png"
+                                                   : "/tmp/gtk4-scrollbar-vertical.png");
+    cairo_surface_destroy(firstImage); cairo_surface_destroy(lastImage);
+    cairo_surface_destroy(scaled); cairo_surface_destroy(disabledBar);
+  }
+  g_assert_false(gdk_surface_get_mapped(gtk_native_get_surface(GTK_NATIVE(r.window))));
+  g_print("Native GTK scrollbar rendering, geometry, proportions, disabled state and 2x scaling passed\n");
   gtk4_renderer_clear(&r);
   return 0;
 }

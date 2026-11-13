@@ -11,6 +11,9 @@ double GTK4NativeWindowCornerRadius(GtkWidget *widget);
 @public
   GtkWidget *_host;
   GtkWidget *_header;
+  GtkWidget *_nativeContent;
+  NSHashTable *_nativeTables;
+  NSArray *_nativeTableRects;
   GtkWidget *_nativeToolbar;
   GtkWidget *_nativeToolbarItems;
   GtkWidget *_nativeToolbarSearch;
@@ -23,6 +26,7 @@ double GTK4NativeWindowCornerRadius(GtkWidget *widget);
   unsigned long _child;
   unsigned long _parent;
   NSRect _lastGeometry;
+  NSPoint _childOffset;
   BOOL _placing;
   BOOL _wantedVisible;
   BOOL _wasMinimized;

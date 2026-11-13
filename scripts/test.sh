@@ -25,10 +25,26 @@ clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) native-menu
   $(pkg-config --libs gtk4-x11) -ldl
 clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-file-panel-test.m \
   -o "$test_build_dir/native-file-panel-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-scroller-test.m \
+  -o "$test_build_dir/native-scroller-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-view-test.m \
+  -o "$test_build_dir/native-view-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) theme-startup-test.m \
+  -o "$test_build_dir/theme-startup-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4-x11)
+for scale in 1 2; do
+  env -u GDK_BACKEND GDK_SCALE="$scale" EXPECTED_UI_SCALE="$scale" \
+    WAYLAND_DISPLAY=gnustep-test-unavailable G_DEBUG=fatal-criticals \
+    xvfb-run -a timeout 15s "$test_build_dir/theme-startup-test"
+done
+env -u GDK_BACKEND GDK_SCALE=2 EXPECTED_UI_SCALE=1 \
+  WAYLAND_DISPLAY=gnustep-test-unavailable G_DEBUG=fatal-criticals \
+  xvfb-run -a timeout 15s "$test_build_dir/theme-startup-test" -GSScaleFactor 1
 for theme in Adwaita Adwaita:dark; do
+  G_DEBUG=fatal-criticals GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-view-test"
   LC_ALL=C DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
     GTK_THEME="$theme" xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/renderer-test"
+  GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-scroller-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
   GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
 done
@@ -41,6 +57,23 @@ env -u GDK_BACKEND xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
 LC_ALL=de_DE.UTF-8 LANGUAGE=de FILE_PANEL_TEST_LANGUAGE=de \
   DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/gtk4native-no-session-bus DCONF_BACKEND=memory \
   xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
+
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) scaling-test.m \
+  -o "$test_build_dir/scaling-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4)
+for scale in 1 2; do
+  GDK_SCALE="$scale" EXPECTED_UI_SCALE="$scale" xvfb-run -a -s '-screen 0 2560x2048x24' "$test_build_dir/scaling-test"
+done
+GDK_SCALE=2 EXPECTED_UI_SCALE=1 xvfb-run -a "$test_build_dir/scaling-test" -GSScaleFactor 1
+
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) live-scaling-test.m \
+  -o "$test_build_dir/live-scaling-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4-x11)
+GDK_SCALE=1 xvfb-run -a -s '-screen 0 2560x2048x24' \
+  "$test_build_dir/live-scaling-test" > "$test_build_dir/live-scaling-test.log" 2>&1
+cat "$test_build_dir/live-scaling-test.log"
+if grep -Eq 'negative width|negative height' "$test_build_dir/live-scaling-test.log"; then exit 1; fi
+
+GDK_SCALE=2 GTK_THEME=Adwaita xvfb-run -a -s '-screen 0 2560x2048x24' \
+  timeout 15s "$test_build_dir/native-scroller-test"
 
 if pkg-config --atleast-version=4.10 gtk4; then
   clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4) native-alert-test.m \

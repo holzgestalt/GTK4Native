@@ -1,4 +1,5 @@
 #include "GTK4Renderer.h"
+#include <math.h>
 
 /* An offscreen GtkWindow subclass keeps the widget tree renderable while
  * never presenting its GdkSurface. Use only public GTK subclassing APIs. */
@@ -73,6 +74,12 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
   gtk_window_set_child(GTK_WINDOW(r->window), box);
   r->button = gtk_button_new();
   r->entry = gtk_entry_new();
+  for (int i = 0; i < 2; i++) {
+    r->scrollbars[i] = gtk_scrollbar_new(i == 0 ? GTK_ORIENTATION_HORIZONTAL
+                                              : GTK_ORIENTATION_VERTICAL, NULL);
+    gtk_widget_add_css_class(r->scrollbars[i], i == 0 ? "bottom" : "right");
+    gtk_fixed_put(GTK_FIXED(box), r->scrollbars[i], 0, 0);
+  }
   gtk_fixed_put(GTK_FIXED(box), r->button, 0, 0);
   gtk_fixed_put(GTK_FIXED(box), r->entry, 0, 0);
   GMenu *model = g_menu_new();
@@ -109,6 +116,72 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
   gtk_widget_set_visible(r->window, TRUE);
   gtk_widget_map(r->window);
   gtk_widget_allocate(r->window, 2048, 2048, -1, NULL);
+  return TRUE;
+}
+
+int gtk4_renderer_scrollbar_width(GTK4Renderer *r)
+{
+  int result = 0;
+  for (int i = 0; i < 2; i++) {
+    int minimum, natural;
+    gtk_widget_measure(r->scrollbars[i], i == 0 ? GTK_ORIENTATION_VERTICAL
+                                               : GTK_ORIENTATION_HORIZONTAL,
+                       -1, &minimum, &natural, NULL, NULL);
+    result = MAX(result, MAX(minimum, natural));
+  }
+  return result;
+}
+
+gboolean gtk4_renderer_scrollbar_prepare(GTK4Renderer *r, gboolean horizontal,
+  double value, double proportion, gboolean enabled, gboolean pressed,
+  int width, int height, GTK4ScrollbarGeometry *geometry)
+{
+  if (width <= 0 || height <= 0 || !isfinite(value) || !isfinite(proportion))
+    return FALSE;
+  GtkWidget *bar = r->scrollbars[horizontal ? 0 : 1];
+  /* Inspect GTK's public widget hierarchy, with a type check. Fall back if
+   * GTK ever changes this implementation instead of relying on private APIs. */
+  GtkWidget *range = gtk_widget_get_first_child(bar);
+  if (!GTK_IS_RANGE(range)) return FALSE;
+  proportion = CLAMP(proportion, 0.0, 1.0);
+  GtkAdjustment *adjustment = gtk_scrollbar_get_adjustment(GTK_SCROLLBAR(bar));
+  gtk_adjustment_configure(adjustment, CLAMP(value, 0.0, 1.0) * (1 - proportion),
+    0, 1, proportion * 0.1, proportion * 0.9, proportion);
+  gtk_widget_set_sensitive(bar, enabled && proportion < 1);
+  GtkStateFlags flags = enabled && proportion < 1 ? GTK_STATE_FLAG_NORMAL
+                                                 : GTK_STATE_FLAG_INSENSITIVE;
+  if (pressed && enabled && proportion < 1)
+    flags |= GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT;
+  gtk_widget_set_state_flags(bar, flags, TRUE);
+  GtkWidget *slider = find_css_node(range, "slider");
+  if (slider) gtk_widget_set_state_flags(slider,
+    pressed ? GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT : GTK_STATE_FLAG_NORMAL, TRUE);
+  int minimum, natural;
+  gtk_widget_measure(bar, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+  if (width < minimum) return FALSE;
+  gtk_widget_measure(bar, GTK_ORIENTATION_VERTICAL, width, &minimum, &natural, NULL, NULL);
+  if (height < minimum) return FALSE;
+  gtk_widget_allocate(bar, width, height, -1, NULL);
+  graphene_rect_t rangeBounds;
+  if (!gtk_widget_compute_bounds(range, bar, &rangeBounds)) return FALSE;
+  GtkWidget *trough = find_css_node(range, "trough");
+  if (!trough || !slider
+      || !gtk_widget_compute_bounds(trough, bar, &geometry->trough)
+      || !gtk_widget_compute_bounds(slider, bar, &geometry->thumb)) return FALSE;
+  /* Use the range's full cross-axis hit area, not only the narrow painted
+   * slider. GTK keeps that area draggable beside the visible thumb too. */
+  if (horizontal) {
+    geometry->thumb.origin.y = geometry->trough.origin.y = rangeBounds.origin.y;
+    geometry->thumb.size.height = geometry->trough.size.height = rangeBounds.size.height;
+  } else {
+    geometry->thumb.origin.x = geometry->trough.origin.x = rangeBounds.origin.x;
+    geometry->thumb.size.width = geometry->trough.size.width = rangeBounds.size.width;
+  }
+  /* CSS borders and pixel rounding may extend the slider one pixel past
+   * its trough at the endpoint. Hit geometry covers the visible portion. */
+  graphene_rect_t clipped;
+  graphene_rect_intersection(&geometry->thumb, &geometry->trough, &clipped);
+  geometry->thumb = clipped;
   return TRUE;
 }
 
@@ -165,6 +238,13 @@ cairo_surface_t *gtk4_renderer_draw(GtkWidget *widget, GtkStateFlags state,
   // animation/frame clock. AppKit supplies its own interaction state.
   gtk_widget_unmap(widget);
   gtk_widget_set_state_flags(widget, state, TRUE);
+  if (GTK_IS_SCROLLBAR(widget)) {
+    GtkWidget *slider = find_css_node(widget, "slider");
+    // Unmapping clears GTK gesture states. Apply AppKit's current interaction
+    // state afterwards so the native slider CSS sees hover/active flags.
+    if (slider) gtk_widget_set_state_flags(slider,
+      state & (GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT), TRUE);
+  }
   int minimum, natural;
   gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, -1,
                      &minimum, &natural, NULL, NULL);

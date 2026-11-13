@@ -21,6 +21,15 @@ int main(void)
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Fallback"];
     NSCAssert(![theme displayNativePopUpMenu:menu atScreenRect:NSZeroRect forWindow:nil],
       @"unavailable GTK declines native menus");
+    NSScroller *bar = [[NSScroller alloc] initWithFrame:NSMakeRect(0,0,18,200)];
+    NSRect geometry;
+    NSCAssert(![theme getScrollerRect:&geometry forPart:NSScrollerKnob inScroller:bar],
+      @"unavailable GTK retains AppKit scroller geometry");
+    NSCAssert(![theme drawNativeScroller:bar dirtyRect:[bar bounds]],
+      @"unavailable GTK retains AppKit scroller drawing");
+    NSCAssert(!NSIsEmptyRect([bar rectForPart:NSScrollerKnobSlot]),
+      @"fallback scroller still has a usable track");
+    [bar release];
     [menu release]; [editor release]; [field release];
     NSLog(@"Unavailable GTK display passed: AppKit drawing, geometry, editing and menu fallback");
   }

@@ -80,7 +80,9 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Sliders/progress/steppers | AppKit fallback | GTK renderers, measurements and interaction states |
 | Menus | Real GTK dropdown/context/positioned menus on X11, with native layout, text, checkmarks, separators and nested submenus; menu bar surfaces use snapshots | Native menubar hosting, Wayland attachment, NSPopUpButton lifecycle |
 | Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
-| Scrolling, tables, tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
+| Scrollers | Whole GtkScrollbar snapshots, GTK thickness and thumb geometry, disabled/pressed states, GTK trough-click preference | Native GTK input/accessibility hosting, hover, overlay fading |
+| Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables, arbitrary AppKit custom drawing |
+| Tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
 The sample's label and text, control events, field editor, keyboard navigation,
@@ -128,8 +130,9 @@ pixel-buffer bridge is needed before production use. GTK resources are accessed
 on AppKit's main thread. GTK animations are disabled in the GNUstep process so
 snapshot states take effect immediately; without a running frame clock they
 could stay at the starting frame. GTK's GLib loop is not yet integrated with
-AppKit, so live settings changes and animations are not supported; restart after
-changing themes. GTK colors are captured at theme activation. Font/size
+AppKit. A common-mode timer now drains pending GDK events to follow desktop scale
+changes, but full frame-clock animation and live GTK color/theme reloads remain
+unsupported; restart after changing the GTK theme. GTK colors are captured at theme activation. Font/size
 overrides are still controlled by AppKit/the app.
 
 The current GNUstep backend remains X11/XWayland. GTK4 drawing alone does not
@@ -316,6 +319,79 @@ run after a blocking native modal interaction. Foreign AppKit parent-window
 attachment is not implemented yet. Tests isolate the session bus so a portal
 cannot open a dialog outside the temporary X display.
 
+## Desktop scaling
+
+GTK4Native now uses GDK's startup monitor scale as the default `GSScaleFactor`
+for GNUstep's X11 backend. A desktop set to 200% therefore scales AppKit layout,
+text, input coordinates and GTK snapshot resolution together. Explicit
+`-GSScaleFactor` or saved application/global defaults take precedence. No desktop
+preferences or global GNUstep defaults are written by the provider.
+
+AppKit records the scale alongside saved window frames so restoring a window
+saved at 100% retains its logical size at 200%. Legacy frames without scale
+metadata are treated as 100%. GTK popup anchor sizes are converted from X11
+pixels to GTK logical coordinates.
+
+The provider polls GDK events through an AppKit common-mode timer and follows
+live scale changes on GDK's first monitor. Existing windows retain their logical
+content size while their pixel dimensions, layout and DPI description update.
+Mixed-DPI transitions between individual monitors and fractional Wayland backing
+scales are not implemented; this remains one integer scale for the process.
+
+`live-scaling-test.m` installs programmatic constraints and changes GDK's X11 scale
+1→2→1→2→1 in the same process. It verifies constrained geometry and resize reflow,
+and the test script rejects negative-size warnings. EditGlyphData's live-scale
+variant additionally exercises its actual XIB-loaded document window and its
+decoded constraints.
+
+`scaling-test.m` checks 100%, 200%, explicit overrides, window/view pixel geometry,
+field-editor transparency, capture dimensions and saved-frame migration. The
+normal test script runs these cases. To exercise EditGlyphData at 200%:
+
+```sh
+GDK_SCALE=2 XVFB_SCREEN=2560x2048x24 bash scripts/test-editglyphdata.sh
+```
+
+## GTK scrollbars
+
+`NSScroller` now snapshots an actual `GtkScrollbar` for each orientation, with a
+`GtkAdjustment` synchronized from its normalized value and knob proportion.
+GTK supplies the complete track/slider rendering, CSS spacing, minimum thumb
+length, and natural thickness. There are no hand-drawn GTK scrollbar parts or
+legacy arrow buttons. Geometry comes from the allocated GTK range, trough and
+slider widgets; unsupported GTK widget hierarchies or allocations use the
+existing AppKit path. Light/dark theme colors and AppKit's backing scale apply
+through the existing snapshot bridge.
+
+The shared AppKit adds two optional GSTheme hooks: `drawNativeScroller:dirtyRect:`
+and `getScrollerRect:forPart:inScroller:`. Both decline by default, preserving
+other providers' drawing and geometry. The first also covers disabled scrollers.
+`NSScroller.isEnabled` now reads its own stored state, matching its existing
+setter instead of consulting NSControl's unrelated cell.
+
+`defaultScrollerWidth` measures both GTK orientations. `NSScrollView` already
+uses that metric in its content/frame sizing, tiling and autohide calculations,
+so it requires no GTK-specific layout code. Scrollbar geometry is shared by
+rendering, hit testing, and normalized thumb dragging. GTK's
+`gtk-primary-button-warps-slider` setting supplies the default jump/page policy;
+an explicit `GSScrollerScrollsByPage` override remains supported.
+
+These are GTK-rendered controls in AppKit views. AppKit retains event tracking,
+target/action dispatch, wheel scrolling, document clipping, and autohiding.
+This first implementation uses always-visible, space-reserving scrollbar
+surfaces rather than GtkScrolledWindow's fading overlay indicators. It does not
+embed GTK input surfaces or provide GTK gestures/accessibility/hover. GTK4 has no
+supported GtkSocket/GtkPlug-style foreign widget embedding API; doing that needs
+a separate window/input-hosting design.
+
+`renderer-test.c` checks both orientations, movement, page proportions, minimum
+thumb size, pressed/disabled states, 2x output, and an unmapped snapshot host.
+`native-scroller-test.m` checks scroll-view layout, thumb hit tests and dragging,
+flipped/unflipped documents, jump/page clicks, resize, autohide, and disabled
+rendering in light/dark and at 2x. Its preview is
+`/tmp/gnustep-gtk4-scrollers.png`. The unavailable-display test verifies fallback;
+shared NSScroller tests verify default hook behavior and enabled-state reporting.
+
 ## Native alerts and automatic button rendering
 
 On GTK 4.10 or newer, the optional GSTheme modal-alert hook routes
@@ -411,6 +487,11 @@ GNOME/XWayland at 200%; EditGlyphData's startup and File→New regression also p
 
 ## Native header toolbars
 
+The GTK top-level receives the AppKit application's icon through `_NET_WM_ICON`
+and inherits the embedded window's `WM_CLASS` so desktop launchers and task
+switchers identify the application correctly. The icon is reapplied after GTK
+maps the host, when GTK would otherwise install its own default icon.
+
 Titled GTK4Native windows place supported toolbars in the GTK header bar using
 real GtkButton, linked GtkToggleButton segments, and GtkSearchEntry widgets.
 AppKit retains toolbar items, targets, action senders, validation and custom
@@ -425,6 +506,12 @@ Header icons render from their NSImage source representations into a 24-point
 canvas at the GTK window's current display scale (24 pixels at 1x, 48 at 2x).
 This preserves PDF detail and selects suitable bitmap representations before
 creating the GTK texture. Display-scale changes regenerate the toolbar textures.
+Standard template icons with direct equivalents use GTK's scalable symbolic
+artwork in the native header: Add/Remove, Refresh and Stop (including freestanding
+variants), Enter/Exit Full Screen, left/right navigation arrows and triangles,
+icon/list views, locked/unlocked padlocks, and Bluetooth. These follow GTK's
+foreground color in light and dark themes. Other images and templates whose
+replacement is unavailable in the GTK icon theme retain the NSImage renderer.
 
 Arbitrary custom views retain the AppKit toolbar below the titlebar. Native
 header toolbars do not currently provide drag-and-drop customization. This uses
@@ -433,3 +520,72 @@ ordinary AppKit toolbar. The native-window regression covers pointer activation,
 original action senders, search keyboard input, segmented/button views, disabled
 states, overflow, display modes, visibility and custom-view fallback transitions
 in light/dark GTK themes and at 200% scale.
+
+## Native compound table rows
+
+Supported one-column, headerless, view-based tables and outlines now use a real
+`GtkScrolledWindow` and `GtkListView`. Existing registered AppKit row prototypes
+remain the source of the hierarchy, layout, bindings, and action senders. The
+bridge translates ordinary NSView/NSTableCellView containers, read-only and
+editable NSTextFields, NSImageViews, buttons, toggles, and checkboxes into real
+GTK widgets. It does not capture AppKit row images. A GTK layout manager uses
+an independent GNUstep Auto Layout engine for each container, with native GTK
+intrinsic sizes and font baseline measurements. It preserves supported anchors,
+dimensions, baselines, equalities/inequalities, constants, multipliers, and AppKit
+constraint, hugging and compression priorities. Native font metrics can still
+differ from macOS. Solvers are reused across row binding and width changes;
+rows do not share GTK's window-wide constraint graph. The enclosing list supplies
+row heights, so populating a placeholder does not change the scroll geometry.
+Constraints between a container and its immediate children are supported,
+including nested containers. Unsupported hierarchies keep the AppKit path.
+
+GTK's list items are recycled. AppKit row prototypes and bindings are constructed
+only for allocated visible items; GTK's offscreen prefetch placeholders stay
+lightweight. Model reload, outline expansion/collapse, selection, activation,
+programmatic scrolling, control properties, text bindings, and target/action are
+bridged to the original Objective-C objects. Native entry editing updates the
+original control and reversible value binding. Editable fields with formatters,
+popup buttons, unsupported custom drawing, custom row backgrounds, and tables
+with headers or multiple columns retain AppKit rendering. The current prototype
+is intended for standard compound rows; it is not a complete native replacement
+for every AppKit control or editing/delegate behavior.
+
+Platform-specific custom content can implement `GTK4NativeCustomView` from
+`GTK4NativeView.h` and return a new unparented GtkWidget from `gtk4NativeWidget`.
+For example, return a GtkDrawingArea with a Cairo draw callback for custom
+artwork. The bridge owns the widget and retains its Objective-C source view.
+This also allows a compound cell to include platform drawing alongside translated
+text fields, images, and buttons.
+
+Native peers live in the GTK window's content overlay. The existing X11 AppKit
+child has completed bounding/input cutouts exposing those widgets. The GTK body
+has an opaque themed background. Pure window moves update root coordinates
+without resizing or reshaping the child; resizing and pane changes publish each
+finished shape once. This avoids temporarily covering native peers and then
+exposing them again during dragging. GTK and AppKit scales must agree before
+importing geometry or rebuilding toolbars. Native peer positions use window
+coordinates, including any AppKit menu above the content view.
+
+Set `GTK4_NATIVE_TABLES=0` before launching to select the existing AppKit table
+path. Unsupported window hosts also use that path. The independent compound-view
+regression checks real GTK widget types, translated layout and resize, NSImage
+content, native text editing and bindings, Objective-C action senders, and a
+platform drawing widget. The EditGlyphData native-table regression opens the
+full GlyphData.xml, switches both row templates, resizes, injects real X11 clicks
+and keyboard navigation, verifies input cutouts and teardown, and moves the
+window over a contrasting background to check for exposed windows underneath.
+
+### Initialization before the display connection
+
+The theme may be requested before `[NSApplication sharedApplication]` connects
+to the display server. GTK4Native defers GTK/backend resources in that case and
+does not query NSScreen from early activation. AppKit calls the generic
+`GSTheme displayServerDidConnect` hook immediately after establishing its
+GSDisplayServer, before creating the first graphics context or loading fonts.
+The GTK provider then selects the matching GDK backend and publishes native
+scale defaults. Explicit GTK backend and AppKit scale overrides still win.
+This prevents the launch-time `Unable to retrieve list of screens from window
+server` exception when a theme is initialized early. The regression requests
+and activates the theme before NSApplication exists, then verifies connected
+screens, backend choice, scaling and native window creation at 1x, 2x and an
+explicit scale override. The standalone C renderer's initialization is unchanged.

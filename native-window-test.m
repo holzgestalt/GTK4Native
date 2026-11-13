@@ -3,6 +3,7 @@
 #import "GTK4NativeWindow.h"
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <assert.h>
 #include <dlfcn.h>
 #include <X11/keysym.h>
@@ -39,6 +40,23 @@ static void pump(double seconds)
   }
 }
 static Display *inputDisplay;
+static void assertApplicationProperty(Display *display, Window child, Window host, const char *name)
+{
+  Atom property = XInternAtom(display, name, False), types[2];
+  int formats[2];
+  unsigned long counts[2], remaining;
+  unsigned char *data[2] = {NULL, NULL};
+  Window windows[] = {child, host};
+  for (int i = 0; i < 2; i++) {
+    assert(XGetWindowProperty(display, windows[i], property, 0, 1024 * 1024,
+      False, AnyPropertyType, &types[i], &formats[i], &counts[i], &remaining, &data[i]) == Success);
+    assert(types[i] != None && counts[i] > 0 && remaining == 0);
+  }
+  assert(types[0] == types[1] && formats[0] == formats[1] && counts[0] == counts[1]);
+  size_t stride = formats[0] == 32 ? sizeof(long) : formats[0] / 8;
+  assert(!memcmp(data[0], data[1], counts[0] * stride));
+  XFree(data[0]); XFree(data[1]);
+}
 static CGFloat toolbarImageDensity;
 @interface ToolbarVectorRep : NSImageRep
 @end
@@ -101,6 +119,11 @@ int main(void)
 {
   NSAutoreleasePool *pool = [NSAutoreleasePool new];
   [NSApplication sharedApplication];
+  const char *iconPath = getenv("NATIVE_WINDOW_APP_ICON");
+  if (iconPath) {
+    NSImage *icon = [[[NSImage alloc] initWithContentsOfFile:[NSString stringWithUTF8String:iconPath]] autorelease];
+    assert(icon != nil); [NSApp setApplicationIconImage:icon];
+  }
   [NSApp finishLaunching];
   NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(100, 120, 480, 300)
     styleMask:NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask
@@ -125,6 +148,29 @@ int main(void)
   if (children) XFree(children);
   assert(parent == view->_parent);
   assert(gtk_widget_get_mapped(view->_host));
+  {
+    Atom type;
+    int format;
+    unsigned long items, remaining;
+    unsigned char *data = NULL;
+    assert(XGetWindowProperty(display, view->_parent, XInternAtom(display, "_NET_WM_ICON", False),
+      0, 1024 * 1024, False, AnyPropertyType, &type, &format, &items, &remaining, &data) == Success);
+    assert(type == XA_CARDINAL && format == 32 && items > 2 && remaining == 0);
+    unsigned long *icon = (unsigned long *)data;
+    NSBitmapImageRep *source = [NSBitmapImageRep imageRepWithData:[[NSApp applicationIconImage] TIFFRepresentation]];
+    assert(icon[0] == [source pixelsWide] && icon[1] == [source pixelsHigh]);
+    assert(items == 2 + icon[0] * icon[1]);
+    NSInteger x = icon[0] / 2, y = icon[1] / 2;
+    NSColor *color = [[source colorAtX:x y:y] colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+    unsigned long expected = ((unsigned long)lround([color alphaComponent] * 255) << 24)
+      | ((unsigned long)lround([color redComponent] * 255) << 16)
+      | ((unsigned long)lround([color greenComponent] * 255) << 8)
+      | (unsigned long)lround([color blueComponent] * 255);
+    // Xlib may sign-extend 32-bit property words on a 64-bit platform.
+    assert((icon[2 + y * icon[0] + x] & 0xffffffffUL) == expected);
+    XFree(data);
+  }
+  assertApplicationProperty(display, view->_child, view->_parent, "WM_CLASS");
   assert(gtk_widget_get_height(view->_header) > 0);
   const char *preview = g_getenv("NATIVE_WINDOW_PREVIEW");
   if (preview) {
@@ -242,6 +288,26 @@ int main(void)
   [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly]; pump(0.2);
   assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
   NSToolbarItem *firstItem = [[toolbar items] objectAtIndex:0];
+  // Exercise the native symbolic replacements, including template names not
+  // supplied as files by this AppKit build. Other artwork uses the renderer.
+  NSArray *templateNames = @[@"NSAddTemplate", @"NSRemoveTemplate", @"NSRefreshTemplate", @"NSRefreshFreestandingTemplate", @"NSStopProgressTemplate", @"NSStopProgressFreestandingTemplate", @"NSEnterFullScreenTemplate", @"NSExitFullScreenTemplate", @"NSGoLeftTemplate", @"NSGoRightTemplate", @"NSLeftFacingTriangleTemplate", @"NSRightFacingTriangleTemplate", @"NSIconViewTemplate", @"NSListViewTemplate", @"NSLockLockedTemplate", @"NSLockUnlockedTemplate", @"NSBluetoothTemplate"];
+  NSArray *symbolNames = @[@"list-add-symbolic", @"list-remove-symbolic", @"view-refresh-symbolic", @"view-refresh-symbolic", @"process-stop-symbolic", @"process-stop-symbolic", @"view-fullscreen-symbolic", @"view-restore-symbolic", @"go-previous-symbolic", @"go-next-symbolic", @"pan-start-symbolic", @"pan-end-symbolic", @"view-grid-symbolic", @"view-list-symbolic", @"changes-prevent-symbolic", @"changes-allow-symbolic", @"bluetooth-symbolic"];
+  for (NSUInteger i = 0; i < [templateNames count]; i++) {
+    NSString *name = [templateNames objectAtIndex:i];
+    NSImage *image = [NSImage imageNamed:name];
+    if (image == nil) {
+      image = [[[NSImage alloc] initWithSize:NSMakeSize(16, 16)] autorelease];
+      [image setName:name]; [image setTemplate:YES];
+    }
+    assert(image != nil);
+    [firstItem setImage:image]; pump(0.1);
+    GtkWidget *symbolButton = gtk_widget_get_first_child(view->_nativeToolbarItems);
+    GtkWidget *symbol = gtk_widget_get_first_child(gtk_button_get_child(GTK_BUTTON(symbolButton)));
+    assert(GTK_IS_IMAGE(symbol));
+    assert(gtk_image_get_storage_type(GTK_IMAGE(symbol)) == GTK_IMAGE_ICON_NAME);
+    assert(!strcmp(gtk_image_get_icon_name(GTK_IMAGE(symbol)), [[symbolNames objectAtIndex:i] UTF8String]));
+    assert(gtk_image_get_pixel_size(GTK_IMAGE(symbol)) == 24);
+  }
   delegate->disableToolbarAction = YES; [toolbar validateVisibleItems]; pump(0.3);
   assert(!gtk_widget_is_sensitive(gtk_widget_get_first_child(view->_nativeToolbarItems)));
   delegate->disableToolbarAction = NO; [toolbar validateVisibleItems]; pump(0.3);
