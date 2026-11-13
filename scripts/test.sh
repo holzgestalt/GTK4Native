@@ -51,3 +51,13 @@ if pkg-config --atleast-version=4.10 gtk4; then
       xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-alert-test"
   done
 fi
+
+# Native GTK top-level ownership, real AppKit input and backend lifecycle.
+clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11) native-window-test.m \
+  -o "$test_build_dir/native-window-test" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4-x11) -ldl
+for theme in Adwaita Adwaita:dark; do
+  LC_ALL=C GTK_THEME="$theme" xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-window-test"
+done
+GDK_SCALE=2 LC_ALL=C xvfb-run -a -s '-screen 0 2560x2048x24' \
+  timeout -k 2s 15s "$test_build_dir/native-window-test"
+GTK4_NATIVE_WINDOWS=0 xvfb-run -a timeout 15s "$test_build_dir/integration-test"

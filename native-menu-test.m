@@ -30,7 +30,8 @@ static int (*fakeKey)(Display *, unsigned int, int, unsigned long);
   for (guint i = 0; i < g_list_model_get_n_items(windows); i++) {
     GtkWidget *window = g_list_model_get_item(windows, i);
     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
-    if (surface && gdk_surface_get_mapped(surface)) dispatchedAfterClose = NO;
+    if (surface && gdk_surface_get_mapped(surface)
+        && !gtk_widget_has_css_class(window, "gnustep-native-window")) dispatchedAfterClose = NO;
     g_object_unref(window);
   }
 }

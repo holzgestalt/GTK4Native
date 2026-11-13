@@ -4,6 +4,7 @@
 #import "GTK4Renderer.h"
 #import "GTK4NativeMenu.h"
 #import "GTK4NativeFilePanel.h"
+#import "GTK4NativeWindow.h"
 
 @interface GTK4NativeTheme : GSGNUstepTheme
 {
@@ -72,7 +73,18 @@ static const GskRoundedRect *saveBackgroundOutline(GskRenderNode *node)
   }
   return NULL;
 }
-static void roundSaveCorners(GtkWidget *window, gpointer unused)
+double GTK4NativeWindowCornerRadius(GtkWidget *widget)
+{
+  GtkSnapshot *snapshot = gtk_snapshot_new();
+  gtk_snapshot_render_background(snapshot, gtk_widget_get_style_context(widget), 0, 0, 1024, 1024);
+  GskRenderNode *node = gtk_snapshot_free_to_node(snapshot);
+  if (!node) return 0;
+  const GskRoundedRect *outline = saveBackgroundOutline(node);
+  double radius = outline ? outline->corner[GSK_CORNER_TOP_LEFT].width : 0;
+  gsk_render_node_unref(node);
+  return radius;
+}
+void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 {
   GtkSnapshot *snapshot = gtk_snapshot_new();
   GtkStyleContext *style = gtk_widget_get_style_context(window);
@@ -83,11 +95,11 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
   if (outline) {
     graphene_size_t left = outline->corner[GSK_CORNER_TOP_LEFT];
     graphene_size_t right = outline->corner[GSK_CORNER_TOP_RIGHT];
-    char css[G_ASCII_DTOSTR_BUF_SIZE * 4 + 160];
+    char css[G_ASCII_DTOSTR_BUF_SIZE * 4 + 420];
     char lx[G_ASCII_DTOSTR_BUF_SIZE], ly[G_ASCII_DTOSTR_BUF_SIZE];
     char rx[G_ASCII_DTOSTR_BUF_SIZE], ry[G_ASCII_DTOSTR_BUF_SIZE];
     g_snprintf(css, sizeof(css),
-      "window.document-save-dialog { border-bottom-left-radius: %spx %spx; border-bottom-right-radius: %spx %spx; }",
+      "window.document-save-dialog, window.gnustep-native-window { border-bottom-left-radius: %spx %spx; border-bottom-right-radius: %spx %spx; } window.gnustep-native-window.maximized, window.gnustep-native-window.fullscreen, window.gnustep-native-window.tiled { border-radius: 0; }",
       g_ascii_dtostr(lx, sizeof(lx), left.width), g_ascii_dtostr(ly, sizeof(ly), left.height),
       g_ascii_dtostr(rx, sizeof(rx), right.width), g_ascii_dtostr(ry, sizeof(ry), right.height));
     GtkCssProvider *provider = gtk_css_provider_new();
@@ -99,6 +111,12 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
 }
 
 @implementation GTK4NativeTheme
+- (id<GSWindowDecorator>)windowDecorator
+{
+  if (_available && GTK4NativeWindowsAvailable()) return (id)[GTK4NativeWindowDecorationView class];
+  return [super windowDecorator];
+}
+
 - (BOOL)usesIndividualDocumentSaveAlerts { return _available; }
 - (BOOL)runNativeDocumentSaveAlertWithTitle:(NSString *)title message:(NSString *)message
                                   buttons:(NSArray *)buttons result:(NSInteger *)result
@@ -109,6 +127,8 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
   g_object_ref_sink(window);
   gtk_window_set_title(GTK_WINDOW(window), [title UTF8String]);
   gtk_window_set_modal(GTK_WINDOW(window), TRUE);
+  GtkWindow *parent = GTK4NativeHostForWindow([NSApp keyWindow] ?: [NSApp mainWindow]);
+  if (parent) gtk_window_set_transient_for(GTK_WINDOW(window), parent);
   gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
   // A custom titlebar requests GTK client-side decorations. Keep decorations
   // enabled so the theme owns the frame, shadow and corner treatment, while
@@ -118,7 +138,7 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
   gtk_window_set_titlebar(GTK_WINDOW(window), titlebar);
   gtk_widget_set_visible(titlebar, FALSE);
   gtk_widget_add_css_class(window, "document-save-dialog");
-  g_signal_connect(window, "map", G_CALLBACK(roundSaveCorners), NULL);
+  g_signal_connect(window, "map", G_CALLBACK(GTK4NativeRoundWindowCorners), NULL);
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
   gtk_widget_set_margin_top(box, 32);
   gtk_widget_set_margin_bottom(box, 24);
@@ -195,7 +215,7 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
   gtk_alert_dialog_set_cancel_button(dialog, (int)cancelButton);
   gtk_alert_dialog_set_modal(dialog, TRUE);
   GTK4AlertResult state = { NO, (int)cancelButton };
-  gtk_alert_dialog_choose(dialog, NULL, NULL, alertChosen, &state);
+  gtk_alert_dialog_choose(dialog, GTK4NativeHostForWindow([NSApp keyWindow] ?: [NSApp mainWindow]), NULL, alertChosen, &state);
   while (!state.finished) {
     for (int i = 0; i < 64 && g_main_context_pending(NULL); i++)
       g_main_context_iteration(NULL, FALSE);
@@ -209,7 +229,6 @@ static void roundSaveCorners(GtkWidget *window, gpointer unused)
   return NO;
 #endif
 }
-
 
 - (NSString *)name { return @"GTK4Native"; }
 - (NSDictionary *)infoDictionary

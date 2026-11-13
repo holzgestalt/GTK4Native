@@ -1,4 +1,5 @@
 #import "GTK4NativeFilePanel.h"
+#import "GTK4NativeWindow.h"
 #include <gtk/gtk.h>
 #include <libintl.h>
 
@@ -27,7 +28,7 @@ static NSArray *choose(NSSavePanel *panel, NSString *directory, NSString *name)
   GtkFileChooserNative *native = gtk_file_chooser_native_new([[panel title] UTF8String],
     // GNUstep's prompt labels the filename field ("Name:"), not this button.
     // Use GTK's own catalog so labels follow the same locale as its chooser.
-    NULL, action, dgettext("gtk40", open ? "_Open" : "_Save"),
+    GTK4NativeHostForWindow([NSApp keyWindow] ?: [NSApp mainWindow]), action, dgettext("gtk40", open ? "_Open" : "_Save"),
     dgettext("gtk40", "_Cancel"));
   GtkFileChooser *chooser = GTK_FILE_CHOOSER(native);
   if (open) gtk_file_chooser_set_select_multiple(chooser, [(NSOpenPanel *)panel allowsMultipleSelection]);

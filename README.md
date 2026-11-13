@@ -75,7 +75,7 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Text fields | Full GTK frame/focus snapshots, native padding, transparent editor; custom colors fall back | Native editing, selection/caret styling, IME and accessibility integration |
 | Colors | GTK symbolic colors mapped into AppKit's System palette | Live GTK setting changes, per-state text colors |
 | Scaling | Cairo device scale and AppKit destination size; tested at 2x | Desktop fractional-scale validation |
-| Window decoration | Desktop/X11 window manager | Native Wayland backend |
+| Window decoration | GTK top-level hosts for titled X11/XWayland windows; native titlebar controls and themed rounded frames | Native Wayland content backend; advanced window-style transitions |
 | Checkboxes/radio buttons | AppKit fallback | GTK indicator rendering and state mapping |
 | Sliders/progress/steppers | AppKit fallback | GTK renderers, measurements and interaction states |
 | Menus | Real GTK dropdown/context/positioned menus on X11, with native layout, text, checkmarks, separators and nested submenus; menu bar surfaces use snapshots | Native menubar hosting, Wayland attachment, NSPopUpButton lifecycle |
@@ -365,3 +365,46 @@ radii onto the bottom corners using a window-local style provider. There is no
 hard-coded radius, and other windows are unaffected. Preview regression checks
 verify transparent bottom corners whenever the desktop supplies transparent top
 corners.
+
+## Native GTK window hosts
+
+GTK4Native's window decorator now creates a real GtkWindow with a GtkHeaderBar
+and embeds the existing GNUstep X11 drawing/input window inside it. GTK owns the
+outer window, titlebar controls, decoration layout, shadow, and rounded frame.
+AppKit still owns content, text editing, menus, document lifecycle and close
+approval. Normal titled windows use this automatically on the XGServer backend
+with an X11 GDK display and the Shape extension. Borderless windows, icons,
+unsupported displays/backends and other providers retain backend ownership.
+`GTK4_NATIVE_WINDOWS=0` or explicit `GTK_CSD=0` selects the legacy path. No new
+library dependency is introduced. This does not make AppKit a Wayland client.
+
+GSWindowDecorationView has default implementations of backendWindowStyleMask,
+orderNativeWindow:relativeTo:, placeNativeWindow: and miniaturizeNativeWindow.
+Existing decorators return the original style and decline native handling.
+NSWindow consults these hooks at backend creation, ordering, placement and
+minimization; no GTK/X11 code is added to the shared GUI API or libs-back.
+
+The GTK provider keeps native and AppKit frame coordinates synchronized through
+the normal backend configure-event path, including GTK decoration/shadow offsets
+and differing GTK/AppKit scale factors. The child surface is shaped to expose
+GTK's titlebar and corner treatment; it maps only after GTK allocates its first
+frame. Native close requests call NSWindow.performClose:, preserving document
+save cancellation. GTK input over the embedded area is excluded from GTK window
+gestures, while the backend receives AppKit pointer and key events. Transient
+parents, modal status, level hints, opacity, size constraints and native
+minimize/restore state are synchronized. File choosers and alerts can use the
+real GTK host as their transient parent.
+
+The current bridge targets normal titled windows on X11/XWayland. Full native
+Wayland hosting, live decoration/font metric changes, dynamic transitions
+between titled and borderless styles and complete fullscreen content-layout
+integration remain separate work. The host uses one GDK display scale, matching
+the existing provider's scaling model.
+
+`native-window-test.m` exercises a real embedded surface, pointer/keyboard text
+editing, frame geometry, resize, title updates, hide/show, one-shot backend
+recreation, the actual GTK close button and AppKit close refusal. On a desktop
+with a window manager, set `NATIVE_WINDOW_WM_TEST=1` to additionally exercise
+maximize/restore and minimize/restore. Set `NATIVE_WINDOW_PREVIEW` to capture the
+X11 native host, including its AppKit child. The desktop tests have passed on
+GNOME/XWayland at 200%; EditGlyphData's startup and File→New regression also pass.
