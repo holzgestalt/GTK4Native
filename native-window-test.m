@@ -29,6 +29,19 @@ static void pump(double seconds)
   }
 }
 static Display *inputDisplay;
+static CGFloat toolbarImageDensity;
+@interface ToolbarVectorRep : NSImageRep
+@end
+@implementation ToolbarVectorRep
+- (BOOL)draw
+{
+  NSAffineTransformStruct matrix = [[[NSGraphicsContext currentContext] GSCurrentCTM] transformStruct];
+  toolbarImageDensity = hypot(matrix.m11, matrix.m12);
+  [[NSColor blackColor] set];
+  NSRectFill(NSMakeRect(0, 0, 16, 16));
+  return YES;
+}
+@end
 static int (*releaseButton)(Display *, unsigned int, int, unsigned long);
 
 @interface WindowDelegate : NSObject
@@ -36,10 +49,42 @@ static int (*releaseButton)(Display *, unsigned int, int, unsigned long);
 @public
   BOOL allowClose;
   int closeRequests;
+  int toolbarClicks;
+  BOOL disableToolbarAction;
+  id toolbarSender;
 }
 @end
 @implementation WindowDelegate
 - (void)releasePointer:(NSTimer *)timer { releaseButton(inputDisplay, 1, False, CurrentTime); XFlush(inputDisplay); }
+- (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar { return [NSArray arrayWithObject:@"action"]; }
+- (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar { return [NSArray arrayWithObjects:@"action", @"search", @"segments", @"custom", @"button", nil]; }
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)insert
+{
+  NSToolbarItem *item = [identifier isEqual:@"search"]
+    ? [[[NSSearchToolbarItem alloc] initWithItemIdentifier:identifier] autorelease]
+    : [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+  if ([identifier isEqual:@"segments"]) {
+    NSSegmentedControl *control = [[[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 70, 24)] autorelease];
+    [control setSegmentCount:2]; [control setLabel:@"A" forSegment:0]; [control setLabel:@"B" forSegment:1];
+    [control setTarget:self]; [control setAction:@selector(toolbarAction:)]; [item setView:control];
+  } else if ([identifier isEqual:@"custom"]) {
+    [item setView:[[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 30, 24)] autorelease]];
+  } else if ([identifier isEqual:@"button"]) {
+    NSButton *control = [[[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 30, 24)] autorelease];
+    [control setTarget:self]; [control setAction:@selector(toolbarAction:)]; [item setView:control];
+  }
+  [item setLabel:@"Run action"]; [item setImage:[NSImage imageNamed:@"common_ToolbarShowFontsItem"]];
+  if ([identifier isEqual:@"action"]) {
+    NSImage *image = [[[NSImage alloc] initWithSize:NSMakeSize(16, 16)] autorelease];
+    ToolbarVectorRep *rep = [[[ToolbarVectorRep alloc] init] autorelease];
+    [rep setSize:NSMakeSize(16, 16)];
+    [rep setPixelsWide:NSImageRepMatchesDevice]; [rep setPixelsHigh:NSImageRepMatchesDevice];
+    [image addRepresentation:rep]; [item setImage:image];
+  }
+  [item setTarget:self]; [item setAction:@selector(toolbarAction:)]; return item;
+}
+- (BOOL)validateToolbarItem:(NSToolbarItem *)item { return !disableToolbarAction; }
+- (void)toolbarAction:(id)sender { toolbarClicks++; toolbarSender = sender; }
 - (BOOL)windowShouldClose:(id)sender { closeRequests++; return allowClose; }
 @end
 int main(void)
@@ -98,6 +143,7 @@ int main(void)
   [field setStringValue:@""];
   NSPoint point = [field convertPoint:NSMakePoint(80, 15) toView:nil];
   int px, py; Window ignored;
+  double dx, dy;
   XTranslateCoordinates(display, view->_child, DefaultRootWindow(display),
     lround(point.x), lround([window frame].size.height - point.y), &px, &py, &ignored);
   motion(display, -1, px, py, CurrentTime);
@@ -111,6 +157,90 @@ int main(void)
   key(display, XKeysymToKeycode(display, XK_a), False, CurrentTime); XFlush(display);
   pump(0.2);
   assert([[[window fieldEditor:NO forObject:field] string] containsString:@"a"]);
+  // A toolbar becomes real GTK widgets in the titlebar, with original senders.
+  NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"native-test"];
+  [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
+  [toolbar setDelegate:(id)delegate];
+  [window setToolbar:toolbar];
+  [toolbar setVisible:YES];
+  pump(0.4);
+  assert(view->_nativeToolbar && gtk_widget_is_ancestor(view->_nativeToolbar, view->_header));
+  GtkWidget *nativeButton = gtk_widget_get_first_child(view->_nativeToolbarItems);
+  assert(GTK_IS_BUTTON(nativeButton));
+  GtkWidget *icon = gtk_widget_get_first_child(gtk_button_get_child(GTK_BUTTON(nativeButton)));
+  assert(GTK_IS_IMAGE(icon));
+  GdkPaintable *paintable = gtk_image_get_paintable(GTK_IMAGE(icon));
+  int iconScale = gtk_widget_get_scale_factor(view->_host);
+  assert(GDK_IS_TEXTURE(paintable));
+  assert(gdk_texture_get_width(GDK_TEXTURE(paintable)) == 24 * iconScale);
+  assert(gdk_texture_get_height(GDK_TEXTURE(paintable)) == 24 * iconScale);
+  assert(fabs(toolbarImageDensity - 1.5 * iconScale) < 0.01);
+  graphene_rect_t buttonBounds, contentBounds;
+  assert(gtk_widget_compute_bounds(nativeButton, view->_host, &buttonBounds));
+  assert(gtk_widget_compute_bounds(gtk_window_get_child(GTK_WINDOW(view->_host)), view->_host, &contentBounds));
+  assert(buttonBounds.origin.y < contentBounds.origin.y);
+  gtk_native_get_surface_transform(GTK_NATIVE(view->_host), &dx, &dy);
+  int toolbarScale = gdk_surface_get_scale_factor(gtk_native_get_surface(GTK_NATIVE(view->_host)));
+  XTranslateCoordinates(display, view->_parent, DefaultRootWindow(display),
+    lround((dx + buttonBounds.origin.x + buttonBounds.size.width / 2) * toolbarScale),
+    lround((dy + buttonBounds.origin.y + buttonBounds.size.height / 2) * toolbarScale), &px, &py, &ignored);
+  motion(display, -1, px, py, CurrentTime);
+  button(display, 1, True, CurrentTime); XFlush(display); pump(0.08);
+  button(display, 1, False, CurrentTime); XFlush(display); pump(0.2);
+  assert(delegate->toolbarClicks == 1);
+  assert([delegate->toolbarSender isKindOfClass:[NSToolbarItem class]]);
+  assert([[[delegate->toolbarSender toolbar] identifier] isEqual:@"native-test"]);
+  NSSize withToolbar = [[window contentView] frame].size;
+  [toolbar setVisible:NO]; pump(0.2);
+  assert(!view->_nativeToolbar);
+  [toolbar setVisible:YES]; pump(0.2);
+  assert(view->_nativeToolbar);
+  assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
+  [toolbar insertItemWithItemIdentifier:@"search" atIndex:1]; pump(0.2);
+  GtkWidget *search = gtk_widget_get_last_child(view->_nativeToolbarItems);
+  assert(GTK_IS_SEARCH_ENTRY(search));
+  assert(gtk_widget_compute_bounds(search, view->_host, &buttonBounds));
+  XTranslateCoordinates(display, view->_parent, DefaultRootWindow(display),
+    lround((dx + buttonBounds.origin.x + buttonBounds.size.width / 2) * toolbarScale),
+    lround((dy + buttonBounds.origin.y + buttonBounds.size.height / 2) * toolbarScale), &px, &py, &ignored);
+  motion(display, -1, px, py, CurrentTime);
+  button(display, 1, True, CurrentTime); XFlush(display); pump(0.08);
+  button(display, 1, False, CurrentTime); XFlush(display); pump(0.1);
+  key(display, XKeysymToKeycode(display, XK_b), True, CurrentTime);
+  key(display, XKeysymToKeycode(display, XK_b), False, CurrentTime); XFlush(display); pump(0.5);
+  NSSearchField *searchField = (id)[[[toolbar items] objectAtIndex:1] view];
+  assert([[searchField stringValue] containsString:@"b"]);
+  assert(delegate->toolbarSender == searchField);
+  [toolbar insertItemWithItemIdentifier:@"segments" atIndex:2]; pump(0.2);
+  GtkWidget *segments = gtk_widget_get_last_child(view->_nativeToolbarItems);
+  assert(GTK_IS_BOX(segments));
+  g_signal_emit_by_name(gtk_widget_get_last_child(segments), "clicked"); pump(0.1);
+  NSSegmentedControl *segmentControl = (id)[[[toolbar items] objectAtIndex:2] view];
+  assert([segmentControl selectedSegment] == 1 && delegate->toolbarSender == segmentControl);
+  [toolbar insertItemWithItemIdentifier:@"button" atIndex:3]; pump(0.2);
+  g_signal_emit_by_name(gtk_widget_get_last_child(view->_nativeToolbarItems), "clicked"); pump(0.1);
+  assert(delegate->toolbarSender == [[[toolbar items] objectAtIndex:3] view]);
+  [toolbar insertItemWithItemIdentifier:@"custom" atIndex:4]; pump(0.2);
+  assert(!view->_nativeToolbar);
+  [toolbar removeItemAtIndex:4]; pump(0.3);
+  assert(view->_nativeToolbar);
+  for (int i = 0; i < 3; i++) [toolbar removeItemAtIndex:1];
+  pump(0.2);
+  assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
+  [toolbar setDisplayMode:NSToolbarDisplayModeIconAndLabel]; pump(0.2);
+  [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly]; pump(0.2);
+  assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
+  NSToolbarItem *firstItem = [[toolbar items] objectAtIndex:0];
+  delegate->disableToolbarAction = YES; [toolbar validateVisibleItems]; pump(0.3);
+  assert(!gtk_widget_is_sensitive(gtk_widget_get_first_child(view->_nativeToolbarItems)));
+  delegate->disableToolbarAction = NO; [toolbar validateVisibleItems]; pump(0.3);
+  assert(gtk_widget_is_sensitive(gtk_widget_get_first_child(view->_nativeToolbarItems)));
+  CGFloat narrowWidth = [window frame].size.width;
+  [firstItem setLabel:@"A toolbar action with a deliberately very long title that needs the overflow menu in a narrow window"];
+  [toolbar setDisplayMode:NSToolbarDisplayModeLabelOnly]; pump(0.3);
+  assert(gtk_widget_get_visible(view->_toolbarOverflow));
+  assert(fabs([window frame].size.width - narrowWidth) < 2);
+  [firstItem setLabel:@"Run action"]; [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly]; pump(0.2);
   NSRect before = [window frame];
   NSRect next = before;
   next.origin.x += 40; next.size.width += 80; next.size.height += 40;
@@ -145,7 +275,6 @@ int main(void)
   assert(close);
   graphene_rect_t closeBounds;
   assert(gtk_widget_compute_bounds(close, view->_host, &closeBounds));
-  double dx, dy;
   gtk_native_get_surface_transform(GTK_NATIVE(view->_host), &dx, &dy);
   int nativeScale = gdk_surface_get_scale_factor(gtk_native_get_surface(GTK_NATIVE(view->_host)));
   XTranslateCoordinates(display, view->_parent, DefaultRootWindow(display),
@@ -161,6 +290,7 @@ int main(void)
   gtk_window_close(GTK_WINDOW(view->_host)); pump(0.1);
   assert(delegate->closeRequests == 2 && ![window isVisible]);
   [window setDelegate:nil];
+  [toolbar release];
   [window release]; [field release]; [delegate release];
   dlclose(xtst);
   pump(0.1);

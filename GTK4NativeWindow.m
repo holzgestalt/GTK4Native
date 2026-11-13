@@ -1,6 +1,21 @@
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4NativeWindow.h"
+#import "GTK4NativeMenu.h"
+#import <GNUstepGUI/GSToolbarView.h>
+
+// Keep the AppKit view attached for toolbar ownership and validation.
+@interface GSWindowDecorationView (GTK4NativeToolbarPrivate)
+- (void)addToolbarView:(GSToolbarView *)view;
+- (void)removeToolbarView:(GSToolbarView *)view;
+- (void)adjustToolbarView:(GSToolbarView *)view;
+@end
+@interface NSToolbar (GTK4NativePrivate)
+- (GSToolbarView *)_toolbarView;
+@end
+@interface GSToolbarView (GTK4NativePrivate)
+- (CGFloat)_heightFromLayout;
+@end
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -63,10 +78,108 @@ static gboolean hostClose(GtkWindow *host, gpointer data)
   [view release];
   return TRUE; // AppKit decides whether an edited document may close.
 }
+static BOOL nativeToolbarHasFocus(GTK4NativeWindowDecorationView *view)
+{
+  GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
+  return focus && view->_nativeToolbar && gtk_widget_is_ancestor(focus, view->_nativeToolbar);
+}
+static void toolbarItemReleased(gpointer item) { [(id)item release]; }
+static void toolbarClicked(GtkButton *button, gpointer data)
+{
+  NSToolbarItem *item = [(id)data retain];
+  NSControl *control = (id)[item view];
+  if ([control isKindOfClass:[NSButton class]]) {
+    NSMenu *menu = [control menu];
+    if (menu) {
+      GtkNative *native = gtk_widget_get_native(GTK_WIDGET(button));
+      GtkWidget *host = GTK_WIDGET(native);
+      graphene_rect_t bounds;
+      if (gtk_widget_compute_bounds(GTK_WIDGET(button), host, &bounds)) {
+        GdkSurface *surface = gtk_native_get_surface(native);
+        int scale = gdk_surface_get_scale_factor(surface);
+        double dx, dy; gtk_native_get_surface_transform(native, &dx, &dy);
+        Display *display = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+        Window root = DefaultRootWindow(display), ignored;
+        int x, y; XWindowAttributes attr;
+        XGetWindowAttributes(display, root, &attr);
+        XTranslateCoordinates(display, gdk_x11_surface_get_xid(surface), root,
+          lround((dx + bounds.origin.x) * scale), lround((dy + bounds.origin.y) * scale), &x, &y, &ignored);
+        GTK4ShowNativeMenu(menu, NSMakeRect(x, attr.height - y - bounds.size.height * scale,
+          bounds.size.width * scale, bounds.size.height * scale), [control window]);
+      }
+    } else [(NSButton *)control performClick:nil];
+    [item release]; return;
+  }
+  NSToolbar *toolbar = [item toolbar];
+  id delegate = [toolbar delegate];
+  if ([delegate respondsToSelector:@selector(toolbarSelectableItemIdentifiers:)]
+      && [[delegate toolbarSelectableItemIdentifiers:toolbar] containsObject:[item itemIdentifier]])
+    [toolbar setSelectedItemIdentifier:[item itemIdentifier]];
+  [NSApp sendAction:[item action] to:[item target] from:item];
+  [item release];
+}
+static void toolbarSearchChanged(GtkSearchEntry *entry, gpointer data)
+{
+  NSSearchField *field = (id)[[(NSToolbarItem *)data view] retain];
+  NSString *text = [NSString stringWithUTF8String:gtk_editable_get_text(GTK_EDITABLE(entry))];
+  if (![[field stringValue] isEqual:text]) {
+    [field setStringValue:text];
+    [field sendAction:[field action] to:[field target]];
+  }
+  [field release];
+}
+static void toolbarSegmentClicked(GtkButton *button, gpointer data)
+{
+  NSToolbarItem *item = [(id)data retain];
+  NSSegmentedControl *control = (id)[item view];
+  NSInteger segment = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "appkit-segment"));
+  if ([control trackingMode] == NSSegmentSwitchTrackingSelectAny)
+    [control setSelected:![control isSelectedForSegment:segment] forSegment:segment];
+  else [control setSelectedSegment:segment];
+  [control sendAction:[control action] to:[control target]];
+  [item release];
+}
+static GtkWidget *toolbarImage(NSImage *image, int scale)
+{
+  const CGFloat iconSize = 24;
+  NSSize size = [image size];
+  if (size.width <= 0 || size.height <= 0) return NULL;
+  // Render the source at GTK's destination density. TIFFRepresentation can
+  // freeze a PDF at its original (often 16-point) resolution before GTK scales it.
+  NSCachedImageRep *canvas = [[NSCachedImageRep alloc]
+    initWithSize:NSMakeSize(iconSize, iconSize)
+    pixelsWide:iconSize * MAX(1, scale) pixelsHigh:iconSize * MAX(1, scale)
+    depth:[[NSScreen mainScreen] depth] separate:YES alpha:YES];
+  NSBitmapImageRep *rep = nil;
+  [[[canvas window] contentView] lockFocus];
+  @try {
+    NSRect bounds = NSMakeRect(0, 0, iconSize, iconSize);
+    NSRectFillUsingOperation(bounds, NSCompositeClear);
+    [[NSColor blackColor] set];
+    CGFloat fit = MIN(iconSize / size.width, iconSize / size.height);
+    NSRect target = NSMakeRect((iconSize - size.width * fit) / 2,
+      (iconSize - size.height * fit) / 2, size.width * fit, size.height * fit);
+    [image drawInRect:target fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];
+    rep = [[[NSBitmapImageRep alloc] initWithFocusedViewRect:bounds] autorelease];
+  } @finally {
+    [[[canvas window] contentView] unlockFocus];
+    [canvas release];
+  }
+  NSData *png = [rep representationUsingType:NSPNGFileType properties:[NSDictionary dictionary]];
+  if (!png) return NULL;
+  GBytes *bytes = g_bytes_new([png bytes], [png length]);
+  GdkTexture *texture = gdk_texture_new_from_bytes(bytes, NULL);
+  g_bytes_unref(bytes);
+  if (!texture) return NULL;
+  GtkWidget *widget = gtk_image_new_from_paintable(GDK_PAINTABLE(texture));
+  gtk_image_set_pixel_size(GTK_IMAGE(widget), 24);
+  g_object_unref(texture);
+  return widget;
+}
 static void hostActive(GObject *host, GParamSpec *spec, gpointer data)
 {
   GTK4NativeWindowDecorationView *view = data;
-  if (gtk_window_is_active(GTK_WINDOW(host)) && view->_child) {
+  if (gtk_window_is_active(GTK_WINDOW(host)) && view->_child && !nativeToolbarHasFocus(view)) {
     NSWindow *window = [view window];
     if ([NSApp modalWindow] && [NSApp modalWindow] != window && ![window worksWhenModal]) return;
     [window makeKeyWindow];
@@ -79,11 +192,24 @@ static void hostActive(GObject *host, GParamSpec *spec, gpointer data)
   }
 }
 
+static void hostFocus(GObject *host, GParamSpec *spec, gpointer data)
+{
+  GTK4NativeWindowDecorationView *view = data;
+  NSWindow *owner = [view window];
+  if (!view->_child || !view->_parent || !gtk_widget_get_mapped(view->_host)
+      || !nativeToolbarHasFocus(view)) return;
+  if ([NSApp modalWindow] && [NSApp modalWindow] != owner && ![owner worksWhenModal]) return;
+  [owner makeKeyWindow];
+  Display *display = (Display *)[GSServerForWindow(owner) serverDevice];
+  XSetInputFocus(display, view->_parent, RevertToParent, CurrentTime);
+  XFlush(display);
+}
+
 static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent *event, gpointer data)
 {
   GTK4NativeWindowDecorationView *view = data;
   GdkEventType type = gdk_event_get_event_type(event);
-  if (type == GDK_KEY_PRESS || type == GDK_KEY_RELEASE) return TRUE;
+  if (type == GDK_KEY_PRESS || type == GDK_KEY_RELEASE) return !nativeToolbarHasFocus(view);
   double x, y, dx, dy;
   if (!gdk_event_get_position(event, &x, &y)) return FALSE;
   gtk_native_get_surface_transform(GTK_NATIVE(view->_host), &dx, &dy);
@@ -95,6 +221,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   BOOL embedded = x >= 0 && x < gtk_widget_get_width(view->_host)
     && y >= bounds.origin.y && y < gtk_widget_get_height(view->_host);
   if (embedded && type == GDK_BUTTON_PRESS && view->_child) {
+    gtk_root_set_focus(GTK_ROOT(view->_host), NULL);
     Display *display = (Display *)[GSServerForWindow([view window]) serverDevice];
     XSetInputFocus(display, view->_child, RevertToParent, CurrentTime);
     XFlush(display);
@@ -166,8 +293,225 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     g_signal_connect(_host, "map", G_CALLBACK(GTK4NativeRoundWindowCorners), NULL);
     g_signal_connect(_host, "close-request", G_CALLBACK(hostClose), self);
     g_signal_connect(_host, "notify::is-active", G_CALLBACK(hostActive), self);
+    g_signal_connect(_host, "notify::focus-widget", G_CALLBACK(hostFocus), self);
   }
   return self;
+}
+// Unsupported custom views retain the normal AppKit toolbar below the header.
+- (BOOL)canHostToolbar
+{
+  if (!hasToolbar) return NO;
+  for (NSToolbarItem *item in [[window toolbar] items])
+    if ([item view] && ![[item view] isKindOfClass:[NSSearchField class]]
+        && ![[item view] isKindOfClass:[NSButton class]]
+        && ![[item view] isKindOfClass:[NSSegmentedControl class]]) return NO;
+  return YES;
+}
+- (void)updateNativeToolbar
+{
+  if (!_host || _updatingToolbar) return;
+  _updatingToolbar = YES;
+  @try {
+    NSToolbar *toolbar = [window toolbar];
+    BOOL native = [self canHostToolbar];
+    NSMutableArray *signature = [NSMutableArray arrayWithObjects:
+      [NSNumber numberWithBool:native], [NSNumber numberWithInteger:[toolbar displayMode]],
+      [NSNumber numberWithInteger:[toolbar sizeMode]],
+      [NSNumber numberWithInt:gtk_widget_get_scale_factor(_host)], nil];
+    if (native) for (NSToolbarItem *item in [toolbar items]) {
+      [signature addObject:[NSArray arrayWithObjects:item, [item label] ?: @"",
+        [item toolTip] ?: @"", [NSValue valueWithPointer:[item image]],
+        [NSValue valueWithPointer:[item view]], nil]];
+    }
+    if (![_toolbarSignature isEqual:signature]) {
+      BOOL previousNative = _nativeToolbar != NULL;
+      BOOL hadSignature = _toolbarSignature != nil;
+      [_toolbarSignature release]; _toolbarSignature = [signature copy];
+      if (_nativeToolbar) {
+        gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header), NULL);
+        _nativeToolbar = _nativeToolbarItems = _toolbarOverflow = NULL;
+      }
+      if (native) {
+        _nativeToolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gtk_widget_set_hexpand(_nativeToolbar, TRUE);
+        gtk_widget_set_tooltip_text(_nativeToolbar, [[window title] UTF8String]);
+        _nativeToolbarItems = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        GtkWidget *scroller = gtk_scrolled_window_new();
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
+        gtk_widget_set_hexpand(scroller, TRUE);
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), _nativeToolbarItems);
+        gtk_box_append(GTK_BOX(_nativeToolbar), scroller);
+        _toolbarOverflow = gtk_menu_button_new();
+        gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(_toolbarOverflow), "view-more-symbolic");
+        gtk_widget_set_tooltip_text(_toolbarOverflow, "More toolbar actions");
+        GtkWidget *popover = gtk_popover_new();
+        GtkWidget *overflowItems = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        gtk_popover_set_child(GTK_POPOVER(popover), overflowItems);
+        gtk_menu_button_set_popover(GTK_MENU_BUTTON(_toolbarOverflow), popover);
+        gtk_box_append(GTK_BOX(_nativeToolbar), _toolbarOverflow);
+        for (NSToolbarItem *item in [toolbar items]) {
+          NSString *identifier = [item itemIdentifier];
+          GtkWidget *widget;
+          if ([identifier isEqual:NSToolbarSpaceItemIdentifier] || [identifier isEqual:NSToolbarFlexibleSpaceItemIdentifier]) {
+            widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+            gtk_widget_set_size_request(widget, 12, -1);
+            gtk_widget_set_hexpand(widget, [identifier isEqual:NSToolbarFlexibleSpaceItemIdentifier]);
+          } else if ([identifier isEqual:NSToolbarSeparatorItemIdentifier]
+                     || [identifier isEqual:@"NSToolbarSidebarTrackingSeparatorItemIdentifier"]
+                     || (![item view] && ![item image] && ![item action])) {
+            widget = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+          } else if ([[item view] isKindOfClass:[NSSegmentedControl class]]) {
+            NSSegmentedControl *control = (id)[item view];
+            widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+            gtk_widget_add_css_class(widget, "linked");
+            for (NSInteger segment = 0; segment < [control segmentCount]; segment++) {
+              GtkWidget *part = gtk_toggle_button_new();
+              GtkWidget *image = [control imageForSegment:segment] ? toolbarImage([control imageForSegment:segment], gtk_widget_get_scale_factor(_host)) : NULL;
+              if (image) gtk_button_set_child(GTK_BUTTON(part), image);
+              else gtk_button_set_label(GTK_BUTTON(part), [[control labelForSegment:segment] UTF8String]);
+              gtk_widget_set_tooltip_text(part, [[control labelForSegment:segment] UTF8String]);
+              g_object_set_data(G_OBJECT(part), "appkit-segment", GINT_TO_POINTER(segment));
+              g_signal_connect(part, "clicked", G_CALLBACK(toolbarSegmentClicked), item);
+              gtk_box_append(GTK_BOX(widget), part);
+            }
+          } else if ([[item view] isKindOfClass:[NSSearchField class]]) {
+            widget = gtk_search_entry_new();
+            gtk_widget_set_size_request(widget, 120, -1);
+            gtk_editable_set_text(GTK_EDITABLE(widget), [[(NSSearchField *)[item view] stringValue] UTF8String]);
+            g_signal_connect(widget, "search-changed", G_CALLBACK(toolbarSearchChanged), item);
+          } else {
+            widget = gtk_button_new();
+            gtk_widget_add_css_class(widget, "flat");
+            GtkWidget *contents = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            NSImage *image = [item image];
+            if (!image && [[item view] isKindOfClass:[NSButton class]]) image = [(NSButton *)[item view] image];
+            BOOL labelOnly = [toolbar displayMode] == NSToolbarDisplayModeLabelOnly;
+            GtkWidget *icon = image && !labelOnly ? toolbarImage(image, gtk_widget_get_scale_factor(_host)) : NULL;
+            if (icon && !labelOnly) gtk_box_append(GTK_BOX(contents), icon);
+            if (!icon || labelOnly || [toolbar displayMode] == NSToolbarDisplayModeIconAndLabel)
+              gtk_box_append(GTK_BOX(contents), gtk_label_new([[item label] UTF8String]));
+            gtk_button_set_child(GTK_BUTTON(widget), contents);
+            g_signal_connect(widget, "clicked", G_CALLBACK(toolbarClicked), item);
+          }
+          g_object_set_data_full(G_OBJECT(widget), "appkit-toolbar-item", [item retain], toolbarItemReleased);
+          gtk_widget_set_tooltip_text(widget, [([item toolTip] ?: [item label]) UTF8String]);
+          gtk_box_append(GTK_BOX(_nativeToolbarItems), widget);
+          if (GTK_IS_BUTTON(widget)) {
+            GtkWidget *overflowItem = gtk_button_new_with_label([[item label] UTF8String]);
+            gtk_widget_add_css_class(overflowItem, "flat");
+            g_object_set_data_full(G_OBJECT(overflowItem), "appkit-toolbar-item", [item retain], toolbarItemReleased);
+            g_signal_connect(overflowItem, "clicked", G_CALLBACK(toolbarClicked), item);
+            g_signal_connect_swapped(overflowItem, "clicked", G_CALLBACK(gtk_popover_popdown), popover);
+            gtk_box_append(GTK_BOX(overflowItems), overflowItem);
+          }
+        }
+        gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header), _nativeToolbar);
+      }
+      CGFloat previous = _toolbarExtraHeight;
+      int minimum, natural;
+      gtk_widget_measure(_header, GTK_ORIENTATION_VERTICAL, -1, &minimum, &natural, NULL, NULL);
+      _toolbarExtraHeight = native ? MAX(0, natural - nativeTitleHeight()) : 0;
+      CGFloat difference = _toolbarExtraHeight - previous;
+      if (hadSignature && hasToolbar && previousNative != native)
+        difference += (native ? -1 : 1) * [[toolbar _toolbarView] _heightFromLayout];
+      if (difference) [self changeWindowHeight:difference];
+      [self layout];
+    }
+    if (_nativeToolbar && g_get_monotonic_time() >= _toolbarValidationTime) {
+      _toolbarValidationTime = g_get_monotonic_time() + 250000;
+      for (NSToolbarItem *item in [toolbar items])
+        if ([item autovalidates] && [item action]) [item validate];
+    }
+    if (_nativeToolbar) {
+      int minimum, natural;
+      gtk_widget_measure(_nativeToolbarItems, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+      GtkWidget *scroller = gtk_widget_get_first_child(_nativeToolbar);
+      int available = gtk_widget_get_width(scroller);
+      if (gtk_widget_get_visible(_toolbarOverflow)) available += gtk_widget_get_width(_toolbarOverflow) + 6;
+      gtk_widget_set_visible(_toolbarOverflow, natural > available && available > 0);
+    }
+    if (_toolbarOverflow) {
+      GtkWidget *popover = GTK_WIDGET(gtk_menu_button_get_popover(GTK_MENU_BUTTON(_toolbarOverflow)));
+      GtkWidget *box = gtk_popover_get_child(GTK_POPOVER(popover));
+      for (GtkWidget *widget = gtk_widget_get_first_child(box); widget; widget = gtk_widget_get_next_sibling(widget)) {
+        NSToolbarItem *item = g_object_get_data(G_OBJECT(widget), "appkit-toolbar-item");
+        gtk_widget_set_sensitive(widget, [item isEnabled]);
+      }
+    }
+    if (_nativeToolbarItems) for (GtkWidget *widget = gtk_widget_get_first_child(_nativeToolbarItems); widget; widget = gtk_widget_get_next_sibling(widget)) {
+      NSToolbarItem *item = g_object_get_data(G_OBJECT(widget), "appkit-toolbar-item");
+      if ([item action] || [item view]) gtk_widget_set_sensitive(widget, [item isEnabled]);
+      if ([[item view] isKindOfClass:[NSControl class]]) gtk_widget_set_sensitive(widget, [(NSControl *)[item view] isEnabled]);
+      if ([[item view] isKindOfClass:[NSSegmentedControl class]]) {
+        NSSegmentedControl *control = (id)[item view];
+        NSInteger segment = 0;
+        for (GtkWidget *part = gtk_widget_get_first_child(widget); part; part = gtk_widget_get_next_sibling(part), segment++) {
+          gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(part), [control trackingMode] != NSSegmentSwitchTrackingMomentary && [control isSelectedForSegment:segment]);
+          gtk_widget_set_sensitive(part, [control isEnabledForSegment:segment]);
+        }
+      }
+      if (GTK_IS_SEARCH_ENTRY(widget) && !gtk_widget_has_focus(widget) && !nativeToolbarHasFocus(self)) {
+        const char *text = [[(NSSearchField *)[item view] stringValue] UTF8String];
+        if (strcmp(gtk_editable_get_text(GTK_EDITABLE(widget)), text ?: ""))
+          gtk_editable_set_text(GTK_EDITABLE(widget), text ?: "");
+      }
+    }
+  } @finally { _updatingToolbar = NO; }
+}
+- (void)layout
+{
+  BOOL native = [self canHostToolbar];
+  BOOL saved = hasToolbar;
+  if (native) hasToolbar = NO;
+  [super layout];
+  hasToolbar = saved;
+  if (native) {
+    [[[window toolbar] _toolbarView] setHidden:YES];
+    for (NSView *view in [self subviews])
+      if (view == [window contentView]) {
+        NSRect frame = [view frame]; frame.size.height = MAX(0, frame.size.height - _toolbarExtraHeight);
+        [view setFrame:frame];
+      } else if ([view isKindOfClass:[NSMenuView class]]) {
+        NSPoint origin = [view frame].origin; origin.y -= _toolbarExtraHeight; [view setFrameOrigin:origin];
+      }
+  } else [[[window toolbar] _toolbarView] setHidden:NO];
+}
+- (NSRect)contentRectForFrameRect:(NSRect)rect styleMask:(NSUInteger)style
+{
+  NSRect result = [super contentRectForFrameRect:rect styleMask:style];
+  if ([self canHostToolbar]) result.size.height += [[[window toolbar] _toolbarView] _heightFromLayout] - _toolbarExtraHeight;
+  return result;
+}
+- (NSRect)frameRectForContentRect:(NSRect)rect styleMask:(NSUInteger)style
+{
+  if ([self canHostToolbar]) rect.size.height -= [[[window toolbar] _toolbarView] _heightFromLayout] - _toolbarExtraHeight;
+  return [super frameRectForContentRect:rect styleMask:style];
+}
+- (void)addToolbarView:(GSToolbarView *)view
+{
+  if (!hasToolbar) {
+    hasToolbar = YES;
+    if ([self canHostToolbar]) {
+      [_toolbarSignature release]; _toolbarSignature = nil;
+      [self addSubview:view]; [view setHidden:YES];
+      [self updateNativeToolbar]; [self layout];
+      return;
+    }
+    hasToolbar = NO;
+  }
+  [super addToolbarView:view];
+}
+- (void)removeToolbarView:(GSToolbarView *)view
+{
+  if (_nativeToolbar) {
+    hasToolbar = NO; [view removeFromSuperviewWithoutNeedingDisplay]; [view setHidden:NO];
+    [self updateNativeToolbar]; [self layout];
+  } else [super removeToolbarView:view];
+}
+- (void)adjustToolbarView:(GSToolbarView *)view
+{
+  if (_nativeToolbar) [self updateNativeToolbar];
+  else [super adjustToolbarView:view];
 }
 - (NSUInteger)backendWindowStyleMask { return NSBorderlessWindowMask; }
 - (void)setTitle:(NSString *)title
@@ -176,6 +520,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   if (_host) {
     NSString *nativeTitle = documentEdited ? [title stringByAppendingString:@" •"] : title;
     gtk_window_set_title(GTK_WINDOW(_host), [nativeTitle UTF8String]);
+    if (_nativeToolbar) gtk_widget_set_tooltip_text(_nativeToolbar, [nativeTitle UTF8String]);
   }
 }
 - (void)setDocumentEdited:(BOOL)edited
@@ -307,6 +652,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     BOOL modal = [NSApp modalWindow] == window || [window sheetParent] != nil;
     if (gtk_window_get_modal(GTK_WINDOW(_host)) != modal)
       gtk_window_set_modal(GTK_WINDOW(_host), modal);
+    [self updateNativeToolbar];
     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(_host));
     BOOL minimized = (gdk_toplevel_get_state(GDK_TOPLEVEL(surface)) & GDK_TOPLEVEL_STATE_MINIMIZED) != 0;
     if (!minimized && gtk_widget_get_mapped(_host)) _sawNativeNormal = YES;
@@ -353,7 +699,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     if (!NSEqualSizes(minSize, _nativeMinSize) || !NSEqualSizes(maxSize, _nativeMaxSize)) {
       GtkWidget *content = gtk_window_get_child(GTK_WINDOW(_host));
       gtk_widget_set_size_request(content, MAX(0, ceil(minSize.width / scale)),
-        MAX(0, ceil(minSize.height / scale - nativeTitleHeight())));
+        MAX(0, ceil(minSize.height / scale - nativeTitleHeight() - _toolbarExtraHeight)));
       XSizeHints hints;
       long supplied;
       if (XGetWMNormalHints(display, _parent, &hints, &supplied)) {
@@ -427,6 +773,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
 - (void)dealloc
 {
   [_hostTimer invalidate];
+  [_toolbarSignature release];
   if (_host) {
     gtk_window_destroy(GTK_WINDOW(_host));
     g_object_unref(_host);
