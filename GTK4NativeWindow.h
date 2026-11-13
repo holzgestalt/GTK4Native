@@ -13,6 +13,7 @@ double GTK4NativeWindowCornerRadius(GtkWidget *widget);
   GtkWidget *_header;
   GtkWidget *_nativeToolbar;
   GtkWidget *_nativeToolbarItems;
+  GtkWidget *_nativeToolbarSearch;
   GtkWidget *_toolbarOverflow;
   NSArray *_toolbarSignature;
   CGFloat _toolbarExtraHeight;

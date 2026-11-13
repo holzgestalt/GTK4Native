@@ -418,8 +418,8 @@ control state. Button-view actions retain their original NSButton sender;
 menu buttons use native GTK popup tracking. Standard separators and flexible
 spaces are supported, and narrow headers provide an overflow action menu.
 The GTK window controls remain in the header. Icon-only, label-only and
-icon-and-label display modes are supported. The window title remains available
-through GTK's window title and a toolbar tooltip.
+icon-and-label display modes are supported. GTK keeps the window title visible
+in the center of the header, alongside the native toolbar controls.
 
 Header icons render from their NSImage source representations into a 24-point
 canvas at the GTK window's current display scale (24 pixels at 1x, 48 at 2x).

@@ -81,7 +81,9 @@ static gboolean hostClose(GtkWindow *host, gpointer data)
 static BOOL nativeToolbarHasFocus(GTK4NativeWindowDecorationView *view)
 {
   GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
-  return focus && view->_nativeToolbar && gtk_widget_is_ancestor(focus, view->_nativeToolbar);
+  return focus && view->_nativeToolbar
+    && (gtk_widget_is_ancestor(focus, view->_nativeToolbar)
+        || (view->_nativeToolbarSearch && gtk_widget_is_ancestor(focus, view->_nativeToolbarSearch)));
 }
 static void toolbarItemReleased(gpointer item) { [(id)item release]; }
 static void toolbarClicked(GtkButton *button, gpointer data)
@@ -328,14 +330,16 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
       BOOL hadSignature = _toolbarSignature != nil;
       [_toolbarSignature release]; _toolbarSignature = [signature copy];
       if (_nativeToolbar) {
-        gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header), NULL);
-        _nativeToolbar = _nativeToolbarItems = _toolbarOverflow = NULL;
+        gtk_header_bar_remove(GTK_HEADER_BAR(_header), _nativeToolbar);
+        gtk_header_bar_remove(GTK_HEADER_BAR(_header), _nativeToolbarSearch);
+        _nativeToolbar = _nativeToolbarItems = _nativeToolbarSearch = _toolbarOverflow = NULL;
       }
       if (native) {
         _nativeToolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         gtk_widget_set_hexpand(_nativeToolbar, TRUE);
         gtk_widget_set_tooltip_text(_nativeToolbar, [[window title] UTF8String]);
         _nativeToolbarItems = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        _nativeToolbarSearch = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         GtkWidget *scroller = gtk_scrolled_window_new();
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
         gtk_widget_set_hexpand(scroller, TRUE);
@@ -395,7 +399,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
           }
           g_object_set_data_full(G_OBJECT(widget), "appkit-toolbar-item", [item retain], toolbarItemReleased);
           gtk_widget_set_tooltip_text(widget, [([item toolTip] ?: [item label]) UTF8String]);
-          gtk_box_append(GTK_BOX(_nativeToolbarItems), widget);
+          gtk_box_append(GTK_BOX(GTK_IS_SEARCH_ENTRY(widget) ? _nativeToolbarSearch : _nativeToolbarItems), widget);
           if (GTK_IS_BUTTON(widget)) {
             GtkWidget *overflowItem = gtk_button_new_with_label([[item label] UTF8String]);
             gtk_widget_add_css_class(overflowItem, "flat");
@@ -405,7 +409,9 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
             gtk_box_append(GTK_BOX(overflowItems), overflowItem);
           }
         }
-        gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header), _nativeToolbar);
+        // Keep GTK's centered title widget; toolbar controls occupy its start side.
+        gtk_header_bar_pack_start(GTK_HEADER_BAR(_header), _nativeToolbar);
+        gtk_header_bar_pack_end(GTK_HEADER_BAR(_header), _nativeToolbarSearch);
       }
       CGFloat previous = _toolbarExtraHeight;
       int minimum, natural;
@@ -438,7 +444,9 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
         gtk_widget_set_sensitive(widget, [item isEnabled]);
       }
     }
-    if (_nativeToolbarItems) for (GtkWidget *widget = gtk_widget_get_first_child(_nativeToolbarItems); widget; widget = gtk_widget_get_next_sibling(widget)) {
+    GtkWidget *itemBoxes[] = {_nativeToolbarItems, _nativeToolbarSearch};
+    for (int box = 0; box < 2; box++) {
+    if (itemBoxes[box]) for (GtkWidget *widget = gtk_widget_get_first_child(itemBoxes[box]); widget; widget = gtk_widget_get_next_sibling(widget)) {
       NSToolbarItem *item = g_object_get_data(G_OBJECT(widget), "appkit-toolbar-item");
       if ([item action] || [item view]) gtk_widget_set_sensitive(widget, [item isEnabled]);
       if ([[item view] isKindOfClass:[NSControl class]]) gtk_widget_set_sensitive(widget, [(NSControl *)[item view] isEnabled]);
@@ -455,6 +463,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
         if (strcmp(gtk_editable_get_text(GTK_EDITABLE(widget)), text ?: ""))
           gtk_editable_set_text(GTK_EDITABLE(widget), text ?: "");
       }
+    }
     }
   } @finally { _updatingToolbar = NO; }
 }

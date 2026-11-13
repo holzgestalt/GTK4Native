@@ -17,6 +17,16 @@ static GtkWidget *closeControl(GtkWidget *widget)
   }
   return NULL;
 }
+static GtkWidget *titleLabel(GtkWidget *widget, const char *title)
+{
+  if (GTK_IS_LABEL(widget) && !strcmp(gtk_label_get_text(GTK_LABEL(widget)), title)
+      && gtk_widget_get_mapped(widget) && gtk_widget_get_width(widget) > 0) return widget;
+  for (GtkWidget *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    GtkWidget *found = titleLabel(child, title);
+    if (found) return found;
+  }
+  return NULL;
+}
 static void pump(double seconds)
 {
   NSDate *end = [NSDate dateWithTimeIntervalSinceNow:seconds];
@@ -165,6 +175,7 @@ int main(void)
   [toolbar setVisible:YES];
   pump(0.4);
   assert(view->_nativeToolbar && gtk_widget_is_ancestor(view->_nativeToolbar, view->_header));
+  assert(titleLabel(view->_header, "Native GTK window test"));
   GtkWidget *nativeButton = gtk_widget_get_first_child(view->_nativeToolbarItems);
   assert(GTK_IS_BUTTON(nativeButton));
   GtkWidget *icon = gtk_widget_get_first_child(gtk_button_get_child(GTK_BUTTON(nativeButton)));
@@ -197,7 +208,7 @@ int main(void)
   assert(view->_nativeToolbar);
   assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
   [toolbar insertItemWithItemIdentifier:@"search" atIndex:1]; pump(0.2);
-  GtkWidget *search = gtk_widget_get_last_child(view->_nativeToolbarItems);
+  GtkWidget *search = gtk_widget_get_last_child(view->_nativeToolbarSearch);
   assert(GTK_IS_SEARCH_ENTRY(search));
   assert(gtk_widget_compute_bounds(search, view->_host, &buttonBounds));
   XTranslateCoordinates(display, view->_parent, DefaultRootWindow(display),
@@ -261,6 +272,12 @@ int main(void)
   }
   [window setTitle:@"Updated native title"];
   assert(!strcmp(gtk_window_get_title(GTK_WINDOW(view->_host)), "Updated native title"));
+  pump(0.1);
+  assert(titleLabel(view->_header, "Updated native title"));
+  [window setDocumentEdited:YES]; pump(0.1);
+  assert(titleLabel(view->_header, "Updated native title •"));
+  [window setDocumentEdited:NO]; pump(0.1);
+  assert(titleLabel(view->_header, "Updated native title"));
   [window orderOut:nil]; pump(0.1);
   assert(!gtk_widget_get_visible(view->_host));
   [window makeKeyAndOrderFront:nil]; pump(0.3);
