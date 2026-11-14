@@ -94,6 +94,7 @@ static int (*releaseButton)(Display *, unsigned int, int, unsigned long);
   if ([identifier isEqual:@"segments"]) {
     NSSegmentedControl *control = [[[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 70, 24)] autorelease];
     [control setSegmentCount:2]; [control setLabel:@"A" forSegment:0]; [control setLabel:@"B" forSegment:1];
+    [control setImage:[NSImage imageNamed:@"common_ToolbarShowFontsItem"] forSegment:0];
     [control setTarget:self]; [control setAction:@selector(toolbarAction:)]; [item setView:control];
   } else if ([identifier isEqual:@"custom"]) {
     [item setView:[[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 30, 24)] autorelease]];
@@ -224,6 +225,20 @@ int main(void)
   pump(0.4);
   assert(view->_nativeToolbar && gtk_widget_is_ancestor(view->_nativeToolbar, view->_header));
   assert(titleLabel(view->_header, "Native GTK window test"));
+  assert(!gtk_widget_has_css_class(view->_header, "default-decoration"));
+  // Match a real GTK header containing a native icon button, including padding.
+  GtkWidget *referenceHost = gtk_window_new();
+  GtkWidget *referenceHeader = gtk_header_bar_new();
+  gtk_window_set_title(GTK_WINDOW(referenceHost), "Reference");
+  gtk_window_set_titlebar(GTK_WINDOW(referenceHost), referenceHeader);
+  gtk_header_bar_pack_start(GTK_HEADER_BAR(referenceHeader), gtk_button_new_from_icon_name("list-add-symbolic"));
+  gtk_widget_realize(referenceHost);
+  int minimumHeader, nativeHeaderHeight, toolbarHeaderHeight;
+  gtk_widget_measure(referenceHeader, GTK_ORIENTATION_VERTICAL, -1, &minimumHeader, &nativeHeaderHeight, NULL, NULL);
+  gtk_widget_measure(view->_header, GTK_ORIENTATION_VERTICAL, -1, &minimumHeader, &toolbarHeaderHeight, NULL, NULL);
+  NSLog(@"Header metrics: toolbar=%d native=%d extra=%.0f", toolbarHeaderHeight, nativeHeaderHeight, view->_toolbarExtraHeight);
+  assert(toolbarHeaderHeight == nativeHeaderHeight);
+  gtk_window_destroy(GTK_WINDOW(referenceHost));
   GtkWidget *nativeButton = gtk_widget_get_first_child(view->_nativeToolbarItems);
   assert(GTK_IS_BUTTON(nativeButton));
   GtkWidget *icon = gtk_widget_get_first_child(gtk_button_get_child(GTK_BUTTON(nativeButton)));
@@ -231,9 +246,38 @@ int main(void)
   GdkPaintable *paintable = gtk_image_get_paintable(GTK_IMAGE(icon));
   int iconScale = gtk_widget_get_scale_factor(view->_host);
   assert(GDK_IS_TEXTURE(paintable));
-  assert(gdk_texture_get_width(GDK_TEXTURE(paintable)) == 24 * iconScale);
-  assert(gdk_texture_get_height(GDK_TEXTURE(paintable)) == 24 * iconScale);
-  assert(fabs(toolbarImageDensity - 1.5 * iconScale) < 0.01);
+  GtkWidget *referenceImage = gtk_image_new_from_icon_name("list-add-symbolic");
+  g_object_ref_sink(referenceImage);
+  gtk_image_set_icon_size(GTK_IMAGE(referenceImage), GTK_ICON_SIZE_NORMAL);
+  int minimumIconSize, nativeIconSize;
+  gtk_widget_measure(referenceImage, GTK_ORIENTATION_HORIZONTAL, -1, &minimumIconSize, &nativeIconSize, NULL, NULL);
+  g_object_unref(referenceImage);
+  int flatIconSize = lround(nativeIconSize * 1.25);
+  int flatIconPadding = (lround(nativeIconSize * 1.5) - flatIconSize) / 2;
+  int flatIconFootprint = flatIconSize + 2 * flatIconPadding;
+  assert(gdk_texture_get_width(GDK_TEXTURE(paintable)) == flatIconSize * iconScale);
+  assert(gdk_texture_get_height(GDK_TEXTURE(paintable)) == flatIconSize * iconScale);
+  assert(fabs(toolbarImageDensity - flatIconSize / 16.0 * iconScale) < 0.01);
+  int minimumSize, imageWidth, imageHeight;
+  gtk_widget_measure(icon, GTK_ORIENTATION_HORIZONTAL, -1, &minimumSize, &imageWidth, NULL, NULL);
+  gtk_widget_measure(icon, GTK_ORIENTATION_VERTICAL, -1, &minimumSize, &imageHeight, NULL, NULL);
+  assert(imageWidth == flatIconFootprint && imageHeight == flatIconFootprint);
+  assert(gtk_widget_get_margin_start(icon) == flatIconPadding);
+  assert(gtk_widget_get_margin_end(icon) == flatIconPadding);
+  assert(gtk_widget_get_margin_top(icon) == flatIconPadding);
+  assert(gtk_widget_get_margin_bottom(icon) == flatIconPadding);
+  GtkWidget *referenceButton = gtk_button_new_from_icon_name("list-add-symbolic");
+  gtk_widget_add_css_class(referenceButton, "flat");
+  gtk_header_bar_pack_start(GTK_HEADER_BAR(view->_header), referenceButton);
+  int referenceWidth, referenceHeight, buttonWidth, buttonHeight;
+  gtk_widget_measure(referenceButton, GTK_ORIENTATION_HORIZONTAL, -1, &minimumSize, &referenceWidth, NULL, NULL);
+  gtk_widget_measure(referenceButton, GTK_ORIENTATION_VERTICAL, -1, &minimumSize, &referenceHeight, NULL, NULL);
+  gtk_widget_measure(nativeButton, GTK_ORIENTATION_HORIZONTAL, -1, &minimumSize, &buttonWidth, NULL, NULL);
+  gtk_widget_measure(nativeButton, GTK_ORIENTATION_VERTICAL, -1, &minimumSize, &buttonHeight, NULL, NULL);
+  NSLog(@"Toolbar metrics: scale=%d icon=%d texture=%d button=%dx%d native=%dx%d", iconScale, imageWidth,
+    gdk_texture_get_width(GDK_TEXTURE(paintable)), buttonWidth, buttonHeight, referenceWidth, referenceHeight);
+  assert(buttonWidth == referenceWidth && buttonHeight == referenceHeight);
+  gtk_header_bar_remove(GTK_HEADER_BAR(view->_header), referenceButton);
   graphene_rect_t buttonBounds, contentBounds;
   assert(gtk_widget_compute_bounds(nativeButton, view->_host, &buttonBounds));
   assert(gtk_widget_compute_bounds(gtk_window_get_child(GTK_WINDOW(view->_host)), view->_host, &contentBounds));
@@ -267,6 +311,7 @@ int main(void)
   NSSize withToolbar = [[window contentView] frame].size;
   [toolbar setVisible:NO]; pump(0.2);
   assert(!view->_nativeToolbar);
+  assert(gtk_widget_has_css_class(view->_header, "default-decoration"));
   [toolbar setVisible:YES]; pump(0.2);
   assert(view->_nativeToolbar);
   assert(NSEqualSizes(withToolbar, [[window contentView] frame].size));
@@ -288,6 +333,11 @@ int main(void)
   [toolbar insertItemWithItemIdentifier:@"segments" atIndex:2]; pump(0.2);
   GtkWidget *segments = gtk_widget_get_last_child(view->_nativeToolbarItems);
   assert(GTK_IS_BOX(segments));
+  GtkWidget *segmentIcon = gtk_button_get_child(GTK_BUTTON(gtk_widget_get_first_child(segments)));
+  assert(GTK_IS_IMAGE(segmentIcon));
+  int segmentWidth;
+  gtk_widget_measure(segmentIcon, GTK_ORIENTATION_HORIZONTAL, -1, &minimumSize, &segmentWidth, NULL, NULL);
+  assert(segmentWidth == nativeIconSize);
   g_signal_emit_by_name(gtk_widget_get_last_child(segments), "clicked"); pump(0.1);
   NSSegmentedControl *segmentControl = (id)[[[toolbar items] objectAtIndex:2] view];
   assert([segmentControl selectedSegment] == 1 && delegate->toolbarSender == segmentControl);
@@ -323,7 +373,10 @@ int main(void)
     assert(GTK_IS_IMAGE(symbol));
     assert(gtk_image_get_storage_type(GTK_IMAGE(symbol)) == GTK_IMAGE_ICON_NAME);
     assert(!strcmp(gtk_image_get_icon_name(GTK_IMAGE(symbol)), [[symbolNames objectAtIndex:i] UTF8String]));
-    assert(gtk_image_get_pixel_size(GTK_IMAGE(symbol)) == 24);
+    assert(gtk_image_get_pixel_size(GTK_IMAGE(symbol)) == flatIconSize);
+    int minimum, natural;
+    gtk_widget_measure(symbol, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+    assert(natural == flatIconFootprint);
   }
   delegate->disableToolbarAction = YES; [toolbar validateVisibleItems]; pump(0.3);
   assert(!gtk_widget_is_sensitive(gtk_widget_get_first_child(view->_nativeToolbarItems)));

@@ -187,9 +187,19 @@ static void toolbarSegmentClicked(GtkButton *button, gpointer data)
   [control sendAction:[control action] to:[control target]];
   [item release];
 }
-static GtkWidget *toolbarImage(NSImage *image, int scale)
+static int nativeToolbarIconSize(void)
 {
-  const CGFloat iconSize = 24;
+  // GTK measurements are logical pixels. Only the backing texture is scaled.
+  GtkWidget *image = gtk_image_new_from_icon_name("image-missing");
+  g_object_ref_sink(image);
+  gtk_image_set_icon_size(GTK_IMAGE(image), GTK_ICON_SIZE_NORMAL);
+  int minimum, natural;
+  gtk_widget_measure(image, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
+  g_object_unref(image);
+  return MAX(1, natural);
+}
+static GtkWidget *toolbarImage(NSImage *image, int scale, int iconSize)
+{
   // Replace standard template bitmaps with semantically equivalent GTK
   // symbolic sources. Unknown names and missing theme icons keep their artwork.
   static const struct { NSString *name; const char *icon; } symbols[] = {
@@ -440,9 +450,14 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
         [item toolTip] ?: @"", [NSValue valueWithPointer:[item image]],
         [NSValue valueWithPointer:[item view]], nil]];
     }
-    if (![_toolbarSignature isEqual:signature]) {
-      BOOL previousNative = _nativeToolbar != NULL;
-      BOOL hadSignature = _toolbarSignature != nil;
+    BOOL toolbarChanged = ![_toolbarSignature isEqual:signature];
+    BOOL previousNative = _nativeToolbar != NULL;
+    BOOL hadSignature = _toolbarSignature != nil;
+    if (toolbarChanged) {
+      // Decoration-only padding stacks with normal header-control margins.
+      // Use the ordinary GTK header style while it hosts toolbar controls.
+      if (native) gtk_widget_remove_css_class(_header, "default-decoration");
+      else gtk_widget_add_css_class(_header, "default-decoration");
       [_toolbarSignature release]; _toolbarSignature = [signature copy];
       if (_nativeToolbar) {
         gtk_header_bar_remove(GTK_HEADER_BAR(_header), _nativeToolbar);
@@ -450,6 +465,13 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
         _nativeToolbar = _nativeToolbarItems = _nativeToolbarSearch = _toolbarOverflow = NULL;
       }
       if (native) {
+        int iconSize = nativeToolbarIconSize();
+        // Keep the original flat-icon footprint while insetting its artwork.
+        // GTK's image-button class still supplies the surrounding button padding.
+        int flatIconSize = [toolbar sizeMode] == NSToolbarSizeModeSmall
+          ? iconSize : (int)lround(iconSize * 1.25);
+        int flatIconPadding = [toolbar sizeMode] == NSToolbarSizeModeSmall ? 0
+          : MAX(0, ((int)lround(iconSize * 1.5) - flatIconSize) / 2);
         _nativeToolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         gtk_widget_set_hexpand(_nativeToolbar, TRUE);
         gtk_widget_set_tooltip_text(_nativeToolbar, [[window title] UTF8String]);
@@ -485,7 +507,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
             gtk_widget_add_css_class(widget, "linked");
             for (NSInteger segment = 0; segment < [control segmentCount]; segment++) {
               GtkWidget *part = gtk_toggle_button_new();
-              GtkWidget *image = [control imageForSegment:segment] ? toolbarImage([control imageForSegment:segment], gtk_widget_get_scale_factor(_host)) : NULL;
+              GtkWidget *image = [control imageForSegment:segment] ? toolbarImage([control imageForSegment:segment], gtk_widget_get_scale_factor(_host), iconSize) : NULL;
               if (image) gtk_button_set_child(GTK_BUTTON(part), image);
               else gtk_button_set_label(GTK_BUTTON(part), [[control labelForSegment:segment] UTF8String]);
               gtk_widget_set_tooltip_text(part, [[control labelForSegment:segment] UTF8String]);
@@ -505,8 +527,16 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
             NSImage *image = [item image];
             if (!image && [[item view] isKindOfClass:[NSButton class]]) image = [(NSButton *)[item view] image];
             BOOL labelOnly = [toolbar displayMode] == NSToolbarDisplayModeLabelOnly;
-            GtkWidget *icon = image && !labelOnly ? toolbarImage(image, gtk_widget_get_scale_factor(_host)) : NULL;
-            if (icon && !labelOnly) gtk_box_append(GTK_BOX(contents), icon);
+            GtkWidget *icon = image && !labelOnly ? toolbarImage(image, gtk_widget_get_scale_factor(_host), flatIconSize) : NULL;
+            if (icon && !labelOnly) {
+              gtk_widget_set_margin_start(icon, flatIconPadding);
+              gtk_widget_set_margin_end(icon, flatIconPadding);
+              gtk_widget_set_margin_top(icon, flatIconPadding);
+              gtk_widget_set_margin_bottom(icon, flatIconPadding);
+              gtk_box_append(GTK_BOX(contents), icon);
+              if ([toolbar displayMode] != NSToolbarDisplayModeIconAndLabel)
+                gtk_widget_add_css_class(widget, "image-button");
+            }
             if (!icon || labelOnly || [toolbar displayMode] == NSToolbarDisplayModeIconAndLabel)
               gtk_box_append(GTK_BOX(contents), gtk_label_new([[item label] UTF8String]));
             gtk_button_set_child(GTK_BUTTON(widget), contents);
@@ -528,16 +558,18 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
         gtk_header_bar_pack_start(GTK_HEADER_BAR(_header), _nativeToolbar);
         gtk_header_bar_pack_end(GTK_HEADER_BAR(_header), _nativeToolbarSearch);
       }
-      CGFloat previous = _toolbarExtraHeight;
-      int minimum, natural;
-      gtk_widget_measure(_header, GTK_ORIENTATION_VERTICAL, -1, &minimum, &natural, NULL, NULL);
-      _toolbarExtraHeight = native ? MAX(0, natural - nativeTitleHeight()) : 0;
-      CGFloat difference = _toolbarExtraHeight - previous;
-      if (hadSignature && hasToolbar && previousNative != native)
-        difference += (native ? -1 : 1) * [[toolbar _toolbarView] _heightFromLayout];
-      if (difference) [self changeWindowHeight:difference];
-      [self layout];
     }
+    // CSS changes settle on GTK's next frame. Re-measure after GLib has run
+    // rather than retaining the pre-change header height until the next reload.
+    CGFloat previous = _toolbarExtraHeight;
+    int minimum, natural;
+    gtk_widget_measure(_header, GTK_ORIENTATION_VERTICAL, -1, &minimum, &natural, NULL, NULL);
+    _toolbarExtraHeight = native ? MAX(0, natural - nativeTitleHeight()) : 0;
+    CGFloat difference = _toolbarExtraHeight - previous;
+    if (toolbarChanged && hadSignature && hasToolbar && previousNative != native)
+      difference += (native ? -1 : 1) * [[toolbar _toolbarView] _heightFromLayout];
+    if (difference) [self changeWindowHeight:difference];
+    if (toolbarChanged || difference) [self layout];
     if (_nativeToolbar && g_get_monotonic_time() >= _toolbarValidationTime) {
       _toolbarValidationTime = g_get_monotonic_time() + 250000;
       for (NSToolbarItem *item in [toolbar items])

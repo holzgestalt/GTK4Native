@@ -644,12 +644,18 @@ AppKit retains toolbar items, targets, action senders, validation and custom
 control state. Button-view actions retain their original NSButton sender;
 menu buttons use native GTK popup tracking. Standard separators and flexible
 spaces are supported, and narrow headers provide an overflow action menu.
+Headers with toolbar controls use GTK's normal header style; the decoration-only
+style is restored when the toolbar is hidden. This avoids stacking decoration
+padding on top of the controls' native vertical margins.
 The GTK window controls remain in the header. Icon-only, label-only and
 icon-and-label display modes are supported. GTK keeps the window title visible
 in the center of the header, alongside the native toolbar controls.
 
-Header icons render from their NSImage source representations into a 24-point
-canvas at the GTK window's current display scale (24 pixels at 1x, 48 at 2x).
+Segmented controls and small toolbar items use GTK's normal icon size (16
+logical pixels with Adwaita). Regular borderless buttons use larger artwork
+(20 logical pixels with Adwaita), inset by 2 pixels on every side to preserve
+the original 24-pixel icon footprint inside the same native button frame. NSImage
+backing dimensions multiply the logical icon size once by the GTK display scale.
 This preserves PDF detail and selects suitable bitmap representations before
 creating the GTK texture. Display-scale changes regenerate the toolbar textures.
 Standard template icons with direct equivalents use GTK's scalable symbolic
