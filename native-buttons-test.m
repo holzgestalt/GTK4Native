@@ -13,6 +13,8 @@
 @end
 @implementation ButtonPage
 - (BOOL)isFlipped { return YES; }
+// Exercise the mixed AppKit/custom-drawing fallback with individual peers.
+- (void)drawRect:(NSRect)rect { [[NSColor whiteColor] set]; NSRectFill(rect); }
 @end
 @interface ButtonActions : NSObject
 {
@@ -106,6 +108,9 @@ int main(void)
   [[window contentView] addSubview:scroll];
   ButtonPage *page=[[[ButtonPage alloc] initWithFrame:NSMakeRect(0,0,1000,1200)] autorelease];
   [scroll setDocumentView:page];
+  // Keep this suite on the mixed-content path; complete scenes have their own test.
+  NSTextView *fallback=[[[NSTextView alloc] initWithFrame:NSZeroRect] autorelease];
+  [page addSubview:fallback];
   NSButton *push=makeButton(page,actions,@"Push",NSMakeRect(20,20,140,34));
   NSButton *def=makeButton(page,actions,@"Default",NSMakeRect(180,20,140,34)); [def setKeyEquivalent:@"\r"];
   NSButton *disabled=makeButton(page,actions,@"Disabled",NSMakeRect(340,20,140,34)); [disabled setEnabled:NO];

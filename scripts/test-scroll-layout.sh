@@ -13,17 +13,17 @@ chmod 600 "$build/GNUstep.conf"
 export GNUSTEP_CONFIG_FILE="$build/GNUstep.conf" GDK_BACKEND=x11
 clang "$root/native/GTK4Native/GTK4Renderer.c" "$root/native/GTK4Native/renderer-test.c" \
   -o "$build/renderer-test" $(pkg-config --cflags --libs gtk4)
-for name in native-scroll-layout native-scroller; do
+for name in native-scroll-layout native-scroller native-scroll-document; do
   clang $(gnustep-config --objc-flags) $(pkg-config --cflags gtk4-x11 cairo-xlib) \
     "$root/native/GTK4Native/$name-test.m" -o "$build/$name-test" \
-    "${theme_libs[@]}" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4-x11 cairo-xlib)
+    "${theme_libs[@]}" $(gnustep-config --gui-libs) $(pkg-config --libs gtk4-x11 cairo-xlib) -ldl
 done
 for appearance in light dark scale2 fractional; do
   theme=Adwaita; scale=1; extra=()
   if [[ "$appearance" != light ]]; then theme=Adwaita:dark; fi
   if [[ "$appearance" == scale2 ]]; then scale=2; fi
   if [[ "$appearance" == fractional ]]; then extra=(-GSScaleFactor 1.5); fi
-  for name in renderer native-scroller native-scroll-layout; do
+  for name in renderer native-scroller native-scroll-layout native-scroll-document; do
     log="$build/$name-$appearance.log"
     GTK_THEME="$theme" GDK_SCALE="$scale" G_DEBUG=fatal-criticals \
       NATIVE_SCROLL_LAYOUT_PREVIEW="$build/$appearance.png" \

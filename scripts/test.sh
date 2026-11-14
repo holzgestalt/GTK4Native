@@ -103,3 +103,6 @@ bash "$plugin_root/scripts/test-buttons.sh"
 
 # Nested native surfaces and thin scroller appearance.
 bash "$plugin_root/scripts/test-scroll-layout.sh"
+
+# Complete scenes and custom AppKit responder/drawing wrappers.
+bash "$plugin_root/scripts/test-custom-views.sh"

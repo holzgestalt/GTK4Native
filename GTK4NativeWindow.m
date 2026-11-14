@@ -296,7 +296,7 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   if (!focus || !gtk_widget_is_ancestor(focus, view->_nativeContent)) return FALSE;
   // Native text entries retain their own activate signal and editing action.
   for (GtkWidget *widget = focus; widget && widget != view->_nativeContent; widget = gtk_widget_get_parent(widget))
-    if (GTK_IS_EDITABLE(widget) || GTK_IS_POPOVER(widget)) return FALSE;
+    if (GTK_IS_EDITABLE(widget) || GTK_IS_POPOVER(widget) || g_object_get_data(G_OBJECT(widget),"appkit-custom-wrapper")) return FALSE;
   GtkWidget *button = gtk_window_get_default_widget(GTK_WINDOW(view->_host));
   return button && gtk_widget_is_sensitive(button) && gtk_widget_get_mapped(button)
     ? gtk_widget_activate(button) : FALSE;

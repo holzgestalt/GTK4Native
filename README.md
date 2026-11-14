@@ -86,7 +86,7 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Menus and choices | Live GtkDropDown for flat text NSPopUpButton selection menus, with selection bindings and item updates; real GTK dropdown/context/positioned menus on X11 | Pull-down/complex NSPopUpButton surfaces, native menubar hosting, Wayland attachment |
 | Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
 | Scrollers | Whole GtkScrollbar snapshots, GTK thickness and thumb geometry, disabled/pressed states, GTK trough-click preference | Native GTK input/accessibility hosting, hover, overlay fading |
-| Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables, arbitrary AppKit custom drawing |
+| Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables and dedicated framework view adapters |
 | Tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
@@ -111,8 +111,8 @@ window content, including controls inside AppKit scroll views and tab pages.
 Its clipped native regions participate in the existing X11 host cutouts. Peers
 follow visibility, scrolling, scale and geometry changes and are removed when
 source views detach. Native table rows continue to use their own view bridges.
-Custom-drawn/custom-mouse-handler subclasses and controls with explicit context
-menus retain their existing AppKit behavior. Wheel input over native controls
+Supported custom application views use the GTK wrapper described below. Controls
+with explicit context menus and unsupported families retain their existing behavior. Wheel input over native controls
 continues to scroll their enclosing AppKit scroll view.
 
 GTK4NativeView maps the gallery's button bezel variants onto ordinary GTK
@@ -393,6 +393,79 @@ normal test script runs these cases. To exercise EditGlyphData at 200%:
 ```sh
 GDK_SCALE=2 XVFB_SCREEN=2560x2048x24 bash scripts/test-editglyphdata.sh
 ```
+
+## GTK scenes and custom AppKit view wrappers
+
+Supported complete window contents now use a single GTK scene, including nested
+scroll views. Standard controls become GTK controls; custom application views
+become GSAppKitWidget children. Each custom wrapper draws only its own drawRect:
+content into a cached bitmap texture, then snapshots its native children above it.
+GTK owns allocation, hit testing, clipping, scrolling, focus and event controllers.
+There are no per-control X windows or moving holes within a complete native scene.
+Custom views can still supply gtk4NativeWidget to provide their own GTK rendering.
+
+All translated containers and table rows use GtkConstraintLayout. AppKit frame
+springs/struts become native equations, intrinsic preferences use GTK constraint
+guides, and text baselines are translated through GTK font measurements. Solved
+geometry is reflected to the source views for coordinate conversion and API calls.
+The previous shadow NSViews and GNUstep solver have been removed from this path.
+
+AppKit's generic GSNativeView peer API has no GTK or theme dependency. It routes
+invalidation straight to a registered peer, suppresses duplicate backing-store
+drawing and AppKit layout for owned views, and transfers programmatic focus to the
+native widget. Ordinary providers keep their existing behavior without a peer.
+Dirty-region queries remain meaningful inside native custom drawing. Printing and caching with an explicit non-window context retains the AppKit path.
+
+GTK pointer/drag/key controllers translate events to the original custom responder.
+A native child owns its own pointer sequence; the parent does not handle it again.
+Responder code runs outside GTK callbacks so application tracking/modal loops can
+continue pumping GTK. A generic native-event source lets a custom AppKit tracking
+loop consume already-captured events without a second hit test or duplicate action.
+Custom insertText: views receive GTK IM commits. Views detach/unregister immediately.
+
+This is a supported-hierarchy integration, not a replacement for every AppKit
+facility. Framework NSTextView, customized field-editor text fields, OpenGL views, rulers and unsupported table/standard
+control families still need dedicated adapters and keep the mixed path. Custom
+tracking-area details, drag-and-drop registration, full accessibility semantics,
+and positioned marked-text composition are additional integration work. Custom
+painting currently uses an offscreen bitmap context and uploads the cached texture
+when dirty; it is not a direct Cairo graphics-port adapter.
+
+`bash native/GTK4Native/scripts/test-custom-views.sh` checks full scenes with
+custom parents/native children, pixel output and partial redraws, direct
+invalidation with host synchronization disabled, mouse/drag/key/focus/text input,
+nested AppKit tracking loops, scrolling, springs/struts resizing and teardown in
+light/dark, 2× and fractional-scale modes. MouseCircle now links GTK4Native and
+uses the custom wrapper without changing CircleView.
+
+## GTK-owned scroll documents
+
+A standard NSScrollView whose complete document hierarchy is supported now hosts
+one GtkScrolledWindow and one native GTK document tree. This includes the
+ControlGallery Buttons & Selection page. Passive NSView subclasses that only
+change coordinate flipping are supported; drawing/input overrides, unsupported
+controls, visible rulers and custom NSScrollView subclasses retain the mixed
+AppKit path. The entire native viewport replaces the AppKit drawing/input region,
+including the gaps between controls. Its X11 cutout stays fixed during scrolling.
+
+GTK handles scrolling, clipping, overlay scrollbars, wheel/kinetic input and
+allocation of this tree in the same frame. Translated document constraints run
+through GtkConstraintLayout, including frame-based positions expressed as native
+constraints. The document path does not create shadow NSViews or use the GNUstep
+layout solver. Native table-row translation now uses the same GTK constraint path. A fixed
+row viewport keeps GtkListView sizing separate from the row constraint layout.
+AppKit objects continue to supply model state, actions and bindings. Native scroll
+adjustments mirror source clip bounds, and programmatic AppKit scrolling updates
+GTK; neither requires repositioning individual controls. Geometry/structure changes
+rebuild the document tree, with immediate invalidation on page replacement/detach.
+
+`native-scroll-document-test.m` freezes host synchronization while sending real
+wheel events, verifies GTK child movement and stable viewport holes, and checks
+that AppKit backing pixels cannot show through. It also checks programmatic scroll,
+model/action, resize, replacement and detach across light/dark and display scales.
+The compound-view suite separately exercises GTK constraint anchors and resizing.
+Mixed documents still use individual hosted controls and AppKit scrolling, so the
+new scrolling guarantee applies to complete supported document trees.
 
 ## Selection popups and nested scroll-view clipping
 

@@ -133,6 +133,8 @@ int main(void)
   NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 220, 300, 30)];
   [field setStringValue:@"AppKit content inside a GTK window"];
   [[window contentView] addSubview:field];
+  // This suite exercises the remaining AppKit editor/native-toolbar boundary.
+  [[window contentView] addSubview:[[[NSTextView alloc] initWithFrame:NSZeroRect] autorelease]];
   WindowDelegate *delegate = [WindowDelegate new];
   [window setDelegate:delegate];
   [NSApp activateIgnoringOtherApps:YES];

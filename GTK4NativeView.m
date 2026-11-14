@@ -1,99 +1,23 @@
 #import "GTK4NativeView.h"
+#import "GTK4NativeCustomView.h"
+#import "GTK4NativeClip.h"
 #include <objc/runtime.h>
-#import "../../src/libs-gui/Source/GSAutoLayoutEngine.h"
-
-/* Native children keep GTK rendering, input and accessibility. Each container
-   has its own GNUstep solver, with native intrinsic sizes and font baselines. */
-@interface GTK4LayoutProxy : NSView
-{
-@public
-  GtkWidget *native;
-}
-@end
-@implementation GTK4LayoutProxy
-- (BOOL)isFlipped { return YES; }
-- (NSSize)intrinsicContentSize
-{
-  if (!native) return NSMakeSize(NSViewNoIntrinsicMetric,NSViewNoIntrinsicMetric);
-  int width=0,height=0;
-  gtk_widget_measure(native,GTK_ORIENTATION_HORIZONTAL,-1,NULL,&width,NULL,NULL);
-  gtk_widget_measure(native,GTK_ORIENTATION_VERTICAL,-1,NULL,&height,NULL,NULL);
-  return NSMakeSize(width,height);
-}
-- (CGFloat)firstBaselineOffsetFromTop
-{
-  int baseline=-1;
-  if (native) gtk_widget_measure(native,GTK_ORIENTATION_VERTICAL,-1,NULL,NULL,NULL,&baseline);
-  return MAX(0,baseline);
-}
-- (CGFloat)baselineOffsetFromBottom
-{ return [self intrinsicContentSize].height - [self firstBaselineOffsetFromTop]; }
-@end
-@interface GTK4Layout : NSObject
-{
-@public
-  GTK4LayoutProxy *root;
-  GSAutoLayoutEngine *engine;
-  NSArray *sizeConstraints;
-}
-@end
-@implementation GTK4Layout
-- (void)dealloc { [engine release]; [root release]; [sizeConstraints release]; [super dealloc]; }
-@end
-static void releaseLayout(gpointer data) { [(id)data release]; }
-typedef struct { GtkLayoutManager parent; } GSNativeLayout;
-typedef struct { GtkLayoutManagerClass parent; } GSNativeLayoutClass;
-G_DEFINE_TYPE(GSNativeLayout, gs_native_layout, GTK_TYPE_LAYOUT_MANAGER)
-static void nativeMeasure(GtkLayoutManager *manager, GtkWidget *widget, GtkOrientation orientation,
-  int forSize,int *minimum,int *natural,int *minBaseline,int *natBaseline)
-{
-  // The enclosing list supplies row heights. Content must not enlarge the
-  // row after a lightweight prefetched placeholder becomes visible.
-  *minimum = *natural = 0;
-  if (minBaseline) *minBaseline = -1;
-  if (natBaseline) *natBaseline = -1;
-}
-static void nativeAllocate(GtkLayoutManager *manager,GtkWidget *widget,int width,int height,int baseline)
-{
-  GTK4Layout *layout = g_object_get_data(G_OBJECT(widget),"appkit-layout");
-  if (!layout) return;
-  [layout->engine beginUpdates];
-  if (!NSEqualSizes(layout->root.frame.size,NSMakeSize(width,height))) {
-    [layout->engine removeConstraints:layout->sizeConstraints];
-    [layout->root setFrameSize:NSMakeSize(width,height)];
-    for (NSLayoutConstraint *c in layout->sizeConstraints)
-      [c setConstant:[c firstAttribute] == NSLayoutAttributeWidth ? width : height];
-    [layout->engine addConstraints:layout->sizeConstraints];
-  }
-  [layout->engine prepareForLayout];
-  [layout->engine endUpdates];
-  for (GTK4LayoutProxy *proxy in layout->root.subviews) {
-    if (!gtk_widget_should_layout(proxy->native)) continue;
-    NSRect rect = [layout->engine alignmentRectForView:proxy];
-    GtkAllocation allocation = {lround(rect.origin.x),lround(rect.origin.y),
-      MAX(0,lround(rect.size.width)),MAX(0,lround(rect.size.height))};
-    gtk_widget_size_allocate(proxy->native,&allocation,-1);
-  }
-}
-static void gs_native_layout_class_init(GSNativeLayoutClass *cls)
-{
-  GTK_LAYOUT_MANAGER_CLASS(cls)->measure = nativeMeasure;
-  GTK_LAYOUT_MANAGER_CLASS(cls)->allocate = nativeAllocate;
-}
-static void gs_native_layout_init(GSNativeLayout *layout) {}
+/* GTK owns allocation, including translated AppKit constraints and intrinsic
+   preferences. AppKit views remain the model/responder objects. */
 typedef struct { GtkWidget parent; } GSNativeContainer;
 typedef struct { GtkWidgetClass parent; } GSNativeContainerClass;
 G_DEFINE_TYPE(GSNativeContainer, gs_native_container, GTK_TYPE_WIDGET)
 static void containerDispose(GObject *object)
 {
   gtk_widget_set_layout_manager(GTK_WIDGET(object),NULL);
-  g_object_set_data(G_OBJECT(object),"appkit-layout",NULL);
   GtkWidget *child;
   while ((child=gtk_widget_get_first_child(GTK_WIDGET(object)))) gtk_widget_unparent(child);
   G_OBJECT_CLASS(gs_native_container_parent_class)->dispose(object);
 }
 static void containerSnapshot(GtkWidget *widget,GtkSnapshot *snapshot)
 {
+  id bridge=g_object_get_data(G_OBJECT(widget),"appkit-bridge");
+  if (bridge) [bridge performSelector:@selector(reflectContainer:) withObject:[NSValue valueWithPointer:widget]];
   for (GtkWidget *child=gtk_widget_get_first_child(widget);child;child=gtk_widget_get_next_sibling(child))
     if (gtk_widget_get_visible(child)) gtk_widget_snapshot_child(widget,child,snapshot);
 }
@@ -103,7 +27,7 @@ static void gs_native_container_class_init(GSNativeContainerClass *cls)
   GTK_WIDGET_CLASS(cls)->snapshot=containerSnapshot;
 }
 static void gs_native_container_init(GSNativeContainer *container)
-{ gtk_widget_set_layout_manager(GTK_WIDGET(container),g_object_new(gs_native_layout_get_type(),NULL)); }
+{ gtk_widget_set_layout_manager(GTK_WIDGET(container),gtk_constraint_layout_new()); }
 
 static GtkConstraintAttribute attribute(NSLayoutAttribute attr)
 {
@@ -125,18 +49,41 @@ static GtkConstraintAttribute attribute(NSLayoutAttribute attr)
 }
 static BOOL containerView(NSView *view)
 {
-  return [view class] == [NSView class] || [view class] == [NSTableCellView class];
+  if ([view respondsToSelector:@selector(gtk4NativeWidget)]) return NO;
+  return [view class] == [NSView class] || [view class] == [NSTableCellView class] ||
+    (GTK4NativeCanWrapView(view) && ![view isKindOfClass:[NSControl class]]
+      && class_getMethodImplementation([view class], @selector(drawRect:)) == class_getMethodImplementation([NSView class], @selector(drawRect:))
+      && class_getMethodImplementation([view class], @selector(mouseDown:)) == class_getMethodImplementation([NSView class], @selector(mouseDown:)));
 }
 
+static BOOL customView(NSView *view)
+{
+  if (!GTK4NativeCanWrapView(view) || containerView(view)) return NO;
+  Class base = [view isKindOfClass:[NSButton class]] ? [NSButton class]
+    : [view isKindOfClass:[NSTextField class]] ? [NSTextField class]
+    : [view isKindOfClass:[NSImageView class]] ? [NSImageView class]
+    : [view isKindOfClass:[NSSwitch class]] ? [NSSwitch class]
+    : [view isKindOfClass:[NSSegmentedControl class]] ? [NSSegmentedControl class]
+    : [view isKindOfClass:[NSMatrix class]] ? [NSMatrix class] : Nil;
+  return !base || class_getMethodImplementation(view.class,@selector(drawRect:)) != class_getMethodImplementation(base,@selector(drawRect:))
+    || class_getMethodImplementation(view.class,@selector(mouseDown:)) != class_getMethodImplementation(base,@selector(mouseDown:));
+}
+static BOOL layoutContainer(NSView *view) { return containerView(view) || customView(view); }
 @interface GTK4NativeView (Private)
 - (GtkWidget *)build:(NSView *)view;
-- (void)configureLayout:(NSView *)view;
+- (void)configureNativeLayout:(NSView *)view;
 - (void)entryChanged:(GtkWidget *)widget;
+- (void)scrollChanged:(GtkWidget *)widget;
 - (void)activate:(GtkWidget *)widget;
 @end
 static void entryChanged(GtkEditable *editable, gpointer bridge) { [(GTK4NativeView *)bridge entryChanged:GTK_WIDGET(editable)]; }
 static void activated(GtkWidget *widget, gpointer bridge) { [(GTK4NativeView *)bridge activate:widget]; }
 
+static void scrollChanged(GtkAdjustment *adjustment,gpointer bridge)
+{
+  GtkWidget *widget=g_object_get_data(G_OBJECT(adjustment),"appkit-scroll-widget");
+  [(GTK4NativeView *)bridge scrollChanged:widget];
+}
 static GdkTexture *imageTexture(NSImage *image)
 {
   if (!image) return NULL;
@@ -227,6 +174,7 @@ static void popupItemBind(GtkSignalListItemFactory *factory, GtkListItem *item, 
 static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
 {
   g_signal_handlers_disconnect_by_data(widget, bridge);
+  if(g_object_get_data(G_OBJECT(widget),"appkit-bridge")==bridge) g_object_set_data(G_OBJECT(widget),"appkit-bridge",NULL);
   for (GtkWidget *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child))
     disconnectBridgeCallbacks(child, bridge);
 }
@@ -235,10 +183,16 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
 + (BOOL)supportsView:(NSView *)view
 {
   if ([view respondsToSelector:@selector(gtk4NativeWidget)]) return YES;
+  if ([view class]==[NSScrollView class]) {
+    NSScrollView *scroll=(id)view;
+    return !scroll.rulersVisible && scroll.documentView && [self supportsView:scroll.documentView];
+  }
+  if([view isKindOfClass:[NSTextField class]] && view.class!=[NSTextField class] && view.class!=[NSSecureTextField class]) return NO;
   BOOL control = [view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSImageView class]]
     || [view isKindOfClass:[NSButton class]] || [view isKindOfClass:[NSSwitch class]]
     || [view isKindOfClass:[NSSegmentedControl class]] || [view isKindOfClass:[NSMatrix class]];
-  if (!control && !containerView(view)) return NO;
+  BOOL wrapped=customView(view);
+  if (!control && !containerView(view) && !wrapped) return NO;
   if ([view isKindOfClass:[NSPopUpButton class]]) {
     if ([(NSPopUpButton *)view pullsDown]) return NO;
     for (id<NSMenuItem> item in [(NSPopUpButton *)view itemArray])
@@ -261,9 +215,9 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     : [view isKindOfClass:[NSSwitch class]] ? [NSSwitch class]
     : [view isKindOfClass:[NSSegmentedControl class]] ? [NSSegmentedControl class]
     : [view isKindOfClass:[NSMatrix class]] ? [NSMatrix class] : nil;
-  if (base && class_getMethodImplementation([view class],@selector(drawRect:))
+  if (base && !wrapped && class_getMethodImplementation([view class],@selector(drawRect:))
       != class_getMethodImplementation(base,@selector(drawRect:))) return NO;
-  if (base && class_getMethodImplementation([view class],@selector(mouseDown:))
+  if (base && !wrapped && class_getMethodImplementation([view class],@selector(mouseDown:))
       != class_getMethodImplementation(base,@selector(mouseDown:))) return NO;
   for (NSLayoutConstraint *constraint in [view constraints]) {
     if (!attribute([constraint firstAttribute]) || ([constraint secondItem] && !attribute([constraint secondAttribute]))) return NO;
@@ -286,6 +240,10 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     if (!_widget) { [self release]; return nil; }
     g_object_ref_sink(_widget);
     [self synchronize];
+    for (NSView *source in _widgets) {
+      GSSetNativeViewPeer(source,self);
+      [source setNeedsDisplay:NO];
+    }
   }
   return self;
 }
@@ -296,6 +254,21 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
 {
   GtkWidget *widget = NULL;
   if ([view respondsToSelector:@selector(gtk4NativeWidget)]) widget = [(id<GTK4NativeCustomView>)view gtk4NativeWidget];
+  else if ([view class]==[NSScrollView class]) {
+    NSScrollView *scroll=(id)view;
+    widget=gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),scroll.hasHorizontalScroller?GTK_POLICY_AUTOMATIC:GTK_POLICY_NEVER,
+      scroll.hasVerticalScroller?GTK_POLICY_AUTOMATIC:GTK_POLICY_NEVER);
+    gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(widget),scroll.borderType!=NSNoBorder);
+    gtk_widget_add_css_class(widget,"view");
+    GtkWidget *document=[self build:scroll.documentView];
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(widget),document);
+    GtkAdjustment *h=gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget));
+    GtkAdjustment *v=gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget));
+    g_object_set_data(G_OBJECT(h),"appkit-scroll-widget",widget); g_object_set_data(G_OBJECT(v),"appkit-scroll-widget",widget);
+    g_signal_connect(h,"value-changed",G_CALLBACK(scrollChanged),self); g_signal_connect(v,"value-changed",G_CALLBACK(scrollChanged),self);
+  }
+  else if (customView(view)) widget=GTK4NativeCustomViewNew(view,_scale);
   else if ([view isKindOfClass:[NSTextField class]]) {
     NSTextField *field = (id)view;
     widget = [field isEditable] ? gtk_entry_new() : gtk_label_new([[field stringValue] UTF8String]);
@@ -312,6 +285,8 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       NSFont *font = [field font];
       if (font) {
         pango_attr_list_insert(attrs, pango_attr_family_new([[font familyName] UTF8String]));
+        if ([[NSFontManager sharedFontManager] traitsOfFont:font] & NSBoldFontMask)
+          pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
         // AppKit font sizes are user-space units. Pango point sizes would
         // apply its DPI conversion again (typically enlarging text by 4/3).
         pango_attr_list_insert(attrs, pango_attr_size_new_absolute([font pointSize] * _scale * PANGO_SCALE));
@@ -378,76 +353,150 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   if (!widget) return NULL;
   [_widgets setObject:[NSValue valueWithPointer:widget] forKey:view];
   g_object_set_data(G_OBJECT(widget), "appkit-view", view);
+  g_object_set_data_full(G_OBJECT(widget),"appkit-source-frame",[[NSValue valueWithRect:view.frame] retain],releaseObject);
   if ([view identifier]) gtk_widget_set_name(widget, [[view identifier] UTF8String]);
-  if (containerView(view)) {
+  g_object_set_data(G_OBJECT(widget),"appkit-bridge",self);
+  if (layoutContainer(view)) {
+    if (customView(view)) gtk_widget_set_layout_manager(widget,gtk_constraint_layout_new());
     for (NSView *child in [view subviews]) {
       GtkWidget *nativeChild = [self build:child];
       if (!nativeChild) { g_object_ref_sink(widget); g_object_unref(widget); return NULL; }
       gtk_widget_set_parent(nativeChild, widget);
     }
-    [self configureLayout:view];
+    [self configureNativeLayout:view];
+  }
+  if([view isKindOfClass:[NSTableCellView class]]) {
+    // GtkListView owns row sizing. Do not let constraint-layout measurement
+    // feed a row's natural-size solve back into list allocation. GTK still
+    // allocates every child through the inner constraint layout.
+    GtkWidget *viewport=GTK4NativeClipNewFilling(widget);
+    g_object_set_data(G_OBJECT(viewport),"appkit-view",view);
+    g_object_set_data(G_OBJECT(viewport),"appkit-bridge",self);
+    g_object_set_data_full(G_OBJECT(viewport),"appkit-source-frame",[[NSValue valueWithRect:view.frame] retain],releaseObject);
+    [_widgets setObject:[NSValue valueWithPointer:viewport] forKey:view];
+    widget=viewport;
   }
   return widget;
 }
-- (void)configureLayout:(NSView *)view
+// Whole native documents use GTK's own constraint solver. No shadow NSViews
+// or GNUstep layout engine participate in allocation or scrolling.
+- (void)configureNativeLayout:(NSView *)view
 {
-  GTK4Layout *layout = [GTK4Layout new];
-  layout->root = [[GTK4LayoutProxy alloc] initWithFrame:NSMakeRect(0,0,NSWidth(view.frame)*_scale,NSHeight(view.frame)*_scale)];
-  [layout->root setTranslatesAutoresizingMaskIntoConstraints:NO];
-  NSMapTable *proxies = [NSMapTable strongToStrongObjectsMapTable];
-  [proxies setObject:layout->root forKey:view];
+  GtkConstraintLayout *layout = GTK_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager([self widgetForView:view]));
+  NSMutableArray *constraints = [NSMutableArray arrayWithArray:view.constraints];
   for (NSView *child in view.subviews) {
-    NSRect rect=child.frame;
-    if (![view isFlipped]) rect.origin.y=NSHeight(view.bounds)-NSMaxY(rect);
-    GTK4LayoutProxy *proxy = [[[GTK4LayoutProxy alloc] initWithFrame:NSMakeRect(rect.origin.x*_scale,
-      rect.origin.y*_scale,rect.size.width*_scale,rect.size.height*_scale)] autorelease];
-    proxy->native = [self widgetForView:child];
-    [proxy setTranslatesAutoresizingMaskIntoConstraints:NO];
-    for (int axis=0;axis<2;axis++) {
-      NSLayoutConstraintOrientation orientation=axis==0 ? NSLayoutConstraintOrientationHorizontal : NSLayoutConstraintOrientationVertical;
-      [proxy setContentHuggingPriority:[child contentHuggingPriorityForOrientation:orientation] forOrientation:orientation];
-      [proxy setContentCompressionResistancePriority:[child contentCompressionResistancePriorityForOrientation:orientation] forOrientation:orientation];
-    }
-    [layout->root addSubview:proxy]; [proxies setObject:proxy forKey:child];
-  }
-  layout->engine = [GSAutoLayoutEngine new];
-  [layout->engine beginUpdates];
-  [layout->engine pinContentView:layout->root];
-  NSMutableArray *sizes=[NSMutableArray array];
-  for (NSLayoutConstraint *c in [layout->engine constraintsForView:layout->root])
-    if ([c firstAttribute]==NSLayoutAttributeWidth || [c firstAttribute]==NSLayoutAttributeHeight) [sizes addObject:c];
-  layout->sizeConstraints=[sizes copy];
-  NSMutableArray *constraints=[NSMutableArray arrayWithArray:view.constraints];
-  for (NSView *child in view.subviews) {
+    GtkWidget *widget = [self widgetForView:child];
     for (NSLayoutConstraint *c in child.constraints)
-      if ([c firstItem]==child && ![c secondItem]) [constraints addObject:c];
-    if ([child translatesAutoresizingMaskIntoConstraints]) {
-      NSView *proxy=[proxies objectForKey:child]; NSRect rect=proxy.frame;
-      [layout->engine addConstraints:@[
-        [proxy.leftAnchor constraintEqualToAnchor:layout->root.leftAnchor constant:rect.origin.x],
-        [proxy.topAnchor constraintEqualToAnchor:layout->root.topAnchor constant:rect.origin.y],
-        [proxy.widthAnchor constraintEqualToConstant:rect.size.width],
-        [proxy.heightAnchor constraintEqualToConstant:rect.size.height]]];
+      if (c.firstItem == child && !c.secondItem) [constraints addObject:c];
+    for(int axis=0;axis<2;axis++) {
+      GtkOrientation orientation=axis==0?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL;
+      NSLayoutConstraintOrientation sourceAxis=axis==0?NSLayoutConstraintOrientationHorizontal:NSLayoutConstraintOrientationVertical;
+      // GTK already supplies ordinary intrinsic preferences. Add explicit
+      // source preferences when the application changes their priorities.
+      if ([child contentHuggingPriorityForOrientation:sourceAxis]==250
+          && [child contentCompressionResistancePriorityForOrientation:sourceAxis]==750) continue;
+      int natural=0; gtk_widget_measure(widget,orientation,-1,NULL,&natural,NULL,NULL);
+      GtkConstraintAttribute attr=axis==0?GTK_CONSTRAINT_ATTRIBUTE_WIDTH:GTK_CONSTRAINT_ATTRIBUTE_HEIGHT;
+      CGFloat minimum=0;
+      for(NSLayoutConstraint *c in constraints)
+        if(c.firstItem==child && !c.secondItem && c.firstAttribute==(axis==0?NSLayoutAttributeWidth:NSLayoutAttributeHeight)
+            && c.priority>=1000 && c.relation!=NSLayoutRelationLessThanOrEqual) minimum=MAX(minimum,c.constant*_scale);
+      natural=MAX(natural,lround(minimum));
+      NSLayoutPriority hugging=[child contentHuggingPriorityForOrientation:sourceAxis];
+      NSLayoutPriority resistance=[child contentCompressionResistancePriorityForOrientation:sourceAxis];
+      GtkConstraintGuide *guide=gtk_constraint_guide_new();
+      gtk_constraint_guide_set_min_size(guide,axis==0?lround(minimum):0,axis==1?lround(minimum):0);
+      gtk_constraint_guide_set_nat_size(guide,axis==0?natural:0,axis==1?natural:0);
+      gtk_constraint_guide_set_max_size(guide,G_MAXINT,G_MAXINT);
+      gtk_constraint_guide_set_strength(guide,MAX(1,(int)MIN(hugging,resistance)*1000));
+      gtk_constraint_layout_add_guide(layout,guide);
+      gtk_constraint_layout_add_constraint(layout,gtk_constraint_new(widget,attr,GTK_CONSTRAINT_RELATION_EQ,
+        guide,attr,1,0,GTK_CONSTRAINT_STRENGTH_REQUIRED));
+    }
+    if (child.translatesAutoresizingMaskIntoConstraints) {
+      NSRect rect = child.frame;
+      if (!view.isFlipped) rect.origin.y = NSHeight(view.bounds) - NSMaxY(rect);
+      CGFloat parentSize[]={NSWidth(view.bounds),NSHeight(view.bounds)};
+      CGFloat positions[]={rect.origin.x,rect.origin.y},sizes[]={rect.size.width,rect.size.height};
+      NSUInteger mask=child.autoresizingMask;
+      BOOL flex[2][3]={{(mask&NSViewMinXMargin)!=0,(mask&NSViewWidthSizable)!=0,(mask&NSViewMaxXMargin)!=0},
+        {(mask&(view.isFlipped?NSViewMinYMargin:NSViewMaxYMargin))!=0,(mask&NSViewHeightSizable)!=0,
+         (mask&(view.isFlipped?NSViewMaxYMargin:NSViewMinYMargin))!=0}};
+      GtkConstraintAttribute positionsAttr[]={GTK_CONSTRAINT_ATTRIBUTE_LEFT,GTK_CONSTRAINT_ATTRIBUTE_TOP};
+      GtkConstraintAttribute sizesAttr[]={GTK_CONSTRAINT_ATTRIBUTE_WIDTH,GTK_CONSTRAINT_ATTRIBUTE_HEIGHT};
+      for(int axis=0;axis<2;axis++) {
+        CGFloat lengths[]={MAX(0,positions[axis]),MAX(0,sizes[axis]),MAX(0,parentSize[axis]-positions[axis]-sizes[axis])};
+        CGFloat total=0; int count=0;
+        for(int i=0;i<3;i++) if(flex[axis][i]) { total+=lengths[i]; count++; }
+        for(int i=0;i<2;i++) {
+          CGFloat weight=flex[axis][i] ? (total>0?lengths[i]/total:1.0/MAX(1,count)) : 0;
+          CGFloat constant=(i==0?positions[axis]:sizes[axis])-parentSize[axis]*weight;
+          gtk_constraint_layout_add_constraint(layout,gtk_constraint_new(widget,i==0?positionsAttr[axis]:sizesAttr[axis],
+            GTK_CONSTRAINT_RELATION_EQ,NULL,weight>0?sizesAttr[axis]:GTK_CONSTRAINT_ATTRIBUTE_NONE,
+            weight>0?weight:1,constant*_scale,GTK_CONSTRAINT_STRENGTH_REQUIRED));
+        }
+      }
     }
   }
   for (NSLayoutConstraint *c in constraints) {
-    NSLayoutConstraint *copy=[NSLayoutConstraint constraintWithItem:[proxies objectForKey:c.firstItem]
-      attribute:c.firstAttribute relatedBy:c.relation toItem:[proxies objectForKey:c.secondItem]
-      attribute:c.secondAttribute multiplier:c.multiplier constant:c.constant*_scale];
-    [copy setPriority:c.priority]; [layout->engine addConstraint:copy];
+    gpointer first = c.firstItem == view ? NULL : [self widgetForView:c.firstItem];
+    gpointer second = c.secondItem == view ? NULL : [self widgetForView:c.secondItem];
+    GtkConstraintRelation relation = c.relation == NSLayoutRelationEqual ? GTK_CONSTRAINT_RELATION_EQ
+      : c.relation == NSLayoutRelationLessThanOrEqual ? GTK_CONSTRAINT_RELATION_LE : GTK_CONSTRAINT_RELATION_GE;
+    int strength = c.priority >= 1000 ? GTK_CONSTRAINT_STRENGTH_REQUIRED : MAX(1, (int)c.priority*1000);
+    GtkConstraintAttribute firstAttr=attribute(c.firstAttribute);
+    GtkConstraintAttribute secondAttr=c.secondItem?attribute(c.secondAttribute):GTK_CONSTRAINT_ATTRIBUTE_NONE;
+    double constant=c.constant*_scale;
+    // GtkConstraintLayout's baseline variable does not position GtkLabel text
+    // in the installed GTK. Express the font-measured baseline through TOP.
+    if(firstAttr==GTK_CONSTRAINT_ATTRIBUTE_BASELINE) {
+      int baseline=-1; if(first) gtk_widget_measure(GTK_WIDGET(first),GTK_ORIENTATION_VERTICAL,-1,NULL,NULL,NULL,&baseline);
+      constant-=MAX(0,baseline); firstAttr=GTK_CONSTRAINT_ATTRIBUTE_TOP;
+    }
+    if(secondAttr==GTK_CONSTRAINT_ATTRIBUTE_BASELINE) {
+      int baseline=-1; if(second) gtk_widget_measure(GTK_WIDGET(second),GTK_ORIENTATION_VERTICAL,-1,NULL,NULL,NULL,&baseline);
+      constant+=c.multiplier*MAX(0,baseline); secondAttr=GTK_CONSTRAINT_ATTRIBUTE_TOP;
+    }
+    double multiplier=c.multiplier;
+    // Keep the child as GTK's target. Parent-target equations from nibs are
+    // algebraically equivalent, but compete with the container's edit size.
+    if(!first && second && multiplier!=0) {
+      gpointer target=second; second=first; first=target;
+      GtkConstraintAttribute attr=firstAttr; firstAttr=secondAttr; secondAttr=attr;
+      constant=-constant/multiplier;
+      if(multiplier>0 && relation!=GTK_CONSTRAINT_RELATION_EQ)
+        relation=relation==GTK_CONSTRAINT_RELATION_GE?GTK_CONSTRAINT_RELATION_LE:GTK_CONSTRAINT_RELATION_GE;
+      multiplier=1.0/multiplier;
+    }
+    gtk_constraint_layout_add_constraint(layout,gtk_constraint_new(first,firstAttr,relation,
+      second,secondAttr,multiplier,constant,strength));
   }
-  [layout->engine endUpdates];
-  g_object_set_data_full(G_OBJECT([self widgetForView:view]),"appkit-layout",layout,releaseLayout);
 }
 - (void)synchronize
 {
+  if (_invalidated || _synchronizing) return;
   _synchronizing = YES;
   for (NSView *view in _widgets) {
     GtkWidget *widget = [self widgetForView:view];
     gtk_widget_set_visible(widget, ![view isHidden]);
     gtk_widget_set_tooltip_text(widget, [[view toolTip] UTF8String]);
     if ([view isKindOfClass:[NSControl class]]) gtk_widget_set_sensitive(widget, [(NSControl *)view isEnabled]);
-    if ([view isKindOfClass:[NSTextField class]]) {
+    if (GTK4NativeIsCustomView(widget)) continue;
+    if ([view class]==[NSScrollView class]) {
+      NSScrollView *scroll=(id)view; NSView *document=scroll.documentView;
+      GtkWidget *nativeDocument=[self widgetForView:document];
+      if (!nativeDocument) { gtk_widget_set_visible(widget,FALSE); continue; }
+      gtk_widget_set_size_request(nativeDocument,MAX(1,lround(NSWidth(document.frame)*_scale)),MAX(1,lround(NSHeight(document.frame)*_scale)));
+      GtkAdjustment *h=gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget));
+      GtkAdjustment *v=gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget));
+      NSValue *last=g_object_get_data(G_OBJECT(widget),"appkit-scroll-origin");
+      if (gtk_adjustment_get_page_size(v)>0 && (!last || !NSEqualPoints(last.pointValue,scroll.contentView.bounds.origin))) {
+        NSRect bounds=scroll.contentView.bounds;
+        gtk_adjustment_set_value(h,NSMinX(bounds)*_scale);
+        gtk_adjustment_set_value(v,(document.isFlipped?NSMinY(bounds):MAX(0,NSHeight(document.bounds)-NSMaxY(bounds)))*_scale);
+        g_object_set_data_full(G_OBJECT(widget),"appkit-scroll-origin",[[NSValue valueWithPoint:bounds.origin] retain],releaseObject);
+      }
+    } else if ([view isKindOfClass:[NSTextField class]]) {
       const char *text = [[(NSTextField *)view stringValue] UTF8String] ?: "";
       if (GTK_IS_EDITABLE(widget)) {
         if (strcmp(gtk_editable_get_text(GTK_EDITABLE(widget)), text)) gtk_editable_set_text(GTK_EDITABLE(widget), text);
@@ -598,8 +647,85 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     [self synchronize];
   } @finally { [self release]; }
 }
+- (void)scrollChanged:(GtkWidget *)widget
+{
+  if (_synchronizing || _invalidated || !g_object_get_data(G_OBJECT(widget),"appkit-scroll-origin")) return;
+  NSScrollView *scroll=g_object_get_data(G_OBJECT(widget),"appkit-view");
+  NSView *document=scroll.documentView; NSClipView *clip=scroll.contentView;
+  double x=gtk_adjustment_get_value(gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget)))/_scale;
+  double y=gtk_adjustment_get_value(gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget)))/_scale;
+  if(!document.isFlipped) y=MAX(0,NSHeight(document.bounds)-NSHeight(clip.bounds)-y);
+  _synchronizing=YES;
+  @try { [clip scrollToPoint:NSMakePoint(x,y)]; [scroll reflectScrolledClipView:clip]; }
+  @finally { _synchronizing=NO; }
+  g_object_set_data_full(G_OBJECT(widget),"appkit-scroll-origin",[[NSValue valueWithPoint:clip.bounds.origin] retain],releaseObject);
+}
+- (NSRect)configurationFrameForView:(NSView *)view
+{
+  GtkWidget *widget=[self widgetForView:view];
+  NSValue *reflected=widget?g_object_get_data(G_OBJECT(widget),"appkit-reflected-frame"):nil;
+  NSValue *original=widget?g_object_get_data(G_OBJECT(widget),"appkit-source-frame"):nil;
+  return reflected && original && NSEqualRects(reflected.rectValue,view.frame)?original.rectValue:view.frame;
+}
+- (void)invalidateNativeView:(NSView *)view inRect:(NSRect)rect
+{
+  if (_invalidated) return;
+  GtkWidget *widget=[self widgetForView:view];
+  if (GTK4NativeIsCustomView(widget)) GTK4NativeCustomViewInvalidate(widget,rect);
+  else { [self synchronize]; if (widget) gtk_widget_queue_draw(widget); }
+}
+- (BOOL)ownsLayoutForNativeView:(NSView *)view { return !_invalidated; }
+- (void)layoutNativeView:(NSView *)view
+{
+  if (_reflecting || _invalidated) return;
+  GtkWidget *widget=[self widgetForView:view]; if (widget) gtk_widget_queue_allocate(widget);
+}
+- (BOOL)focusNativeView:(NSView *)view
+{
+  GtkWidget *widget=[self widgetForView:view];
+  return !_invalidated && widget && gtk_widget_grab_focus(widget);
+}
+- (void)reflectContainer:(NSValue *)value
+{
+  if (_reflecting || _invalidated) return;
+  GtkWidget *widget=value.pointerValue;
+  NSView *parent=g_object_get_data(G_OBJECT(widget),"appkit-view");
+  _reflecting=YES;
+  @try {
+    for (NSView *view in parent.subviews) {
+      GtkWidget *child=[self widgetForView:view]; graphene_rect_t rect;
+      if (!child || !gtk_widget_should_layout(child) || !gtk_widget_compute_bounds(child,widget,&rect)
+          || rect.size.width<=0 || rect.size.height<=0) continue;
+      NSValue *expected=g_object_get_data(G_OBJECT(child),"appkit-reflected-frame");
+      if(!expected) expected=g_object_get_data(G_OBJECT(child),"appkit-source-frame");
+      // An application geometry change wins until its native constraints are
+      // rebuilt. An in-flight snapshot must not restore the previous frame.
+      if(expected && !NSEqualRects(view.frame,expected.rectValue)) continue;
+      NSRect frame=NSMakeRect(rect.origin.x/_scale,rect.origin.y/_scale,rect.size.width/_scale,rect.size.height/_scale);
+      if (!parent.isFlipped) frame.origin.y=NSHeight(parent.bounds)-NSMaxY(frame);
+      if (!NSEqualRects(view.frame,frame)) [view setFrame:frame];
+      g_object_set_data_full(G_OBJECT(child),"appkit-reflected-frame",[[NSValue valueWithRect:view.frame] retain],releaseObject);
+    }
+  } @finally { _reflecting=NO; }
+}
+- (void)invalidate
+{
+  if (_invalidated) return;
+  _invalidated=YES;
+  for (NSView *view in _widgets) {
+    if (GSNativeViewPeerForView(view)==self) GSSetNativeViewPeer(view,nil);
+    GtkWidget *widget=[self widgetForView:view];
+    g_object_set_data(G_OBJECT(widget),"appkit-bridge",NULL);
+    if(GTK_IS_SCROLLED_WINDOW(widget)) {
+      g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget)),self);
+      g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget)),self);
+    }
+  }
+  if (_widget) { disconnectBridgeCallbacks(_widget,self); gtk_widget_set_visible(_widget,FALSE); }
+}
 - (void)dealloc
 {
+  [self invalidate];
   _synchronizing = YES;
   if (_widget) {
     disconnectBridgeCallbacks(_widget, self);

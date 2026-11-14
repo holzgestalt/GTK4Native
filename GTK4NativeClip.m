@@ -8,6 +8,7 @@ typedef struct {
   GtkWidget parent;
   GtkWidget *child;
   GtkAllocation allocation;
+  gboolean fill;
 } GTK4Clip;
 typedef struct { GtkWidgetClass parent; } GTK4ClipClass;
 G_DEFINE_TYPE(GTK4Clip, gtk4_native_clip, GTK_TYPE_WIDGET)
@@ -23,6 +24,11 @@ static void clipAllocate(GtkWidget *widget, int width, int height, int baseline)
   GTK4Clip *clip = (GTK4Clip *)widget;
   if (clip->child) {
     GtkAllocation allocation = clip->allocation;
+    if(clip->fill) {
+      allocation=(GtkAllocation){0,0,width,height};
+      gtk_widget_size_allocate(clip->child,&allocation,-1);
+      return;
+    }
     int minimumWidth = 0, minimumHeight = 0;
     gtk_widget_measure(clip->child, GTK_ORIENTATION_HORIZONTAL, -1, &minimumWidth, NULL, NULL, NULL);
     int width = MAX(allocation.width, minimumWidth);
@@ -63,6 +69,12 @@ GtkWidget *GTK4NativeClipNew(GtkWidget *child)
 {
   GtkWidget *widget = g_object_new(gtk4_native_clip_get_type(), NULL);
   GTK4NativeClipSetChild(widget, child);
+  return widget;
+}
+GtkWidget *GTK4NativeClipNewFilling(GtkWidget *child)
+{
+  GtkWidget *widget=GTK4NativeClipNew(child);
+  ((GTK4Clip *)widget)->fill=TRUE;
   return widget;
 }
 void GTK4NativeClipSetChild(GtkWidget *widget, GtkWidget *child)

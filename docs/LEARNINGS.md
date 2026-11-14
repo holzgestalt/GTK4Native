@@ -300,3 +300,85 @@ scroll adjustment page, offset behind the clip. Cropping the scroller allocation
 itself would change the visible row count and cause scrolling/layout jumps.
 Tests sample magenta AppKit sentinels outside both viewport edges and verify
 clipping, full-size allocation, hiding, resize and detachment at 1x/2x/1.5x.
+
+
+## Scroll the whole native document instead of chasing AppKit controls
+
+Per-control X11 cutouts cannot make two renderers scroll atomically. AppKit copies
+its backing surface when the clip origin changes, while the native peer timer
+moves GTK widgets and publishes new holes later. Accelerating the timer still
+permits stale AppKit controls to peek through. Supported scroll documents instead
+use one GtkScrolledWindow, a complete GTK child tree and a stable viewport cutout.
+GTK owns movement and clipping; mirrored AppKit clip bounds serve model/API calls.
+The native document uses GtkConstraintLayout directly, without solver proxy views.
+Mixed/custom-drawn documents keep the old path until their content is supported.
+
+GNUstep scroll views can report hasHorizontalRuler even when rulers are hidden.
+Eligibility must check rulersVisible, rather than rejecting any potential ruler.
+A native peer can also survive dictionary removal through autoreleased allValues
+arrays; explicitly invalidate and unparent it at removal, rather than waiting for
+dealloc, so page replacement never leaves a stale GTK scene visible.
+
+The real-wheel regression disables host synchronization and proves that native
+children scroll correctly, the viewport cutout remains fixed, source clip bounds
+are mirrored, and AppKit backing pixels stay hidden. Compound layout tests verify
+GTK constraint anchors and elastic resizing separately from existing row layout.
+
+
+## Shared native peers and complete GTK scenes
+
+GSNativeView supplies optional, weak platform peers with no theme/GTK dependency.
+An owned subtree must stop AppKit backing drawing and layout, not merely cover
+its controls with native widgets. Invalidation queues the GTK node immediately;
+custom drawRect: executes once in its own bitmap context and native children are
+snapshotted separately. A scoped native drawing rectangle preserves getRectsBeingDrawn:
+and needsToDrawRect:. Whole supported window contents and nested scroll trees can
+now publish one stable native region. Framework views without adapters remain mixed.
+
+GTK-owned geometry must be reflected to source frames so existing convertPoint:
+and responder code keep working. Those reflected frames are not structural changes:
+configuration signatures compare original layout frames unless application code
+changes the geometry. Springs/struts become parent-size equations in GTK. All
+translated row/container layout now uses GtkConstraintLayout, without proxy NSViews.
+
+GtkConstraintLayout baseline variables did not position the actual GtkLabel text in
+this environment. Translate first/last baselines to TOP plus GTK-measured font
+baseline offsets. Intrinsic priorities use GTK constraint guides. Direct overlapping
+soft inequalities triggered solver teardown corruption under repeated resize/detach;
+guides pass the same source-priority, pixel-baseline and teardown regression.
+
+GTK gestures propagate through ancestors. A custom parent's gesture must deny a
+sequence picked on a native descendant, or its mouseDown steals the child's click.
+Native surface transforms also include decoration offsets: real-input tests must
+add gtk_native_get_surface_transform when converting widget coordinates to X11.
+
+Application mouseDown may enter an AppKit tracking loop. Deliver responder methods
+outside GTK callbacks so the host can pump GDK recursively. Already-captured events
+may sit in the run loop's currently executing selector batch; scheduling another
+selector alone cannot make them visible to nextEventMatchingMask:. The scoped generic
+GSNativeEventSource supplies those queued events to the active tracking loop, and
+consumed requests are skipped later. Events arriving during tracking enter the
+ordinary AppKit event queue. Tests cover both ordinary callbacks and a blocking
+custom tracking handler, without a second hit test or duplicate source action.
+
+
+Native list rows need a fixed GTK viewport around their constraint container.
+Letting GtkListView measure the constraint container directly retained the
+measurement solve's expansion in real nib rows, although isolated window layout
+passed. The row viewport reports no content-driven minimum and allocates the inner
+GTK constraint layout at the exact list-provided size. Real EditGlyphData column
+and baseline checks must run alongside standalone layout tests. Nib constraints
+may also put a minimum on the child and reverse the parent/child equation order;
+include child constraints in intrinsic bounds and normalize parent-target equations.
+
+Do not reflect geometry from hidden/unallocated native widgets, or a pending scene
+replacement can write zero size into the source clip view. Do not overwrite source
+frames changed by application code while a previous snapshot is in flight. Both
+races are covered by resize/replacement and unflipped scroll regressions.
+
+Specialized AppKit field-editor subclasses require dedicated adapters. A generic
+custom drawing wrapper must not swallow a validating NSTextField subclass's editor
+focus; retain that family's existing path. Custom NSView/NSControl subclasses,
+including blocking tracking handlers, use the shared GTK wrapper. Framework
+container subclasses are eligible only when their base has an adapter, so inherited
+AppKit layout does not silently become a fixed native scene.

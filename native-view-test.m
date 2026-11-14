@@ -87,6 +87,7 @@ int main(void)
   GTK4NativeView *bridge = [[GTK4NativeView alloc] initWithView:root scale:1];
   NSCAssert(bridge != nil, @"a compound AppKit hierarchy must translate");
   GtkWidget *native = bridge.widget;
+  NSCAssert(GTK_IS_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager(native)), @"GTK owns compound-view constraints");
   GtkWidget *window = gtk_window_new(); g_object_ref_sink(window);
   gtk_window_set_default_size(GTK_WINDOW(window),460,90);
   gtk_window_set_child(GTK_WINDOW(window),native);
@@ -104,6 +105,7 @@ int main(void)
   gtk_window_set_default_size(GTK_WINDOW(window),640,90); pump();
   e = bounds(nativeEntry,native);
   NSCAssert(e.size.width > width + 150, @"GTK constraints must resize the native entry");
+  NSCAssert(fabs(entry.frame.size.width-e.size.width)<2, @"solved GTK geometry is reflected to source views");
   gtk_editable_set_text(GTK_EDITABLE(nativeEntry),"Edited natively");
   NSCAssert([test.text isEqual:@"Edited natively"] && [[entry stringValue] isEqual:test.text], @"native editing must update the original control and binding");
   g_signal_emit_by_name(nativeButton,"clicked");
@@ -116,34 +118,37 @@ int main(void)
   NSCAssert(customBridge && GTK_IS_DRAWING_AREA(customBridge.widget), @"custom platform drawing may provide a real GTK widget");
   [customBridge release];
   UnsupportedDrawing *unsupported = [[[UnsupportedDrawing alloc] initWithFrame:NSZeroRect] autorelease];
-  NSCAssert(![GTK4NativeView supportsView:unsupported], @"unsupported drawing keeps the AppKit fallback");
+  NSCAssert([GTK4NativeView supportsView:unsupported], @"custom drawing uses a GTK wrapper");
   // Match EditGlyphData's list prototype: a compact, right-aligned Unicode
   // field and an elastic name with a shared baseline but different fonts.
   NSTableCellView *row = [[[NSTableCellView alloc] initWithFrame:NSMakeRect(0,0,300,21)] autorelease];
   NSTextField *code = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
   NSTextField *name = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
-  for (NSTextField *field in @[code,name]) {
+  for (NSTextField *field in @[name,code]) {
+    [field setContentHuggingPriority:750 forOrientation:NSLayoutConstraintOrientationVertical];
     [field setEditable:NO]; [field setTranslatesAutoresizingMaskIntoConstraints:NO]; [row addSubview:field];
   }
   [code setFont:[NSFont userFixedPitchFontOfSize:11]]; [code setAlignment:NSRightTextAlignment];
-  [name setFont:[NSFont systemFontOfSize:13]];
+  [name setFont:[NSFont systemFontOfSize:12]];
   [code setStringValue:@"0369"]; [name setStringValue:@"icomb"];
   [code setContentHuggingPriority:251 forOrientation:NSLayoutConstraintOrientationHorizontal];
   [code setContentCompressionResistancePriority:250 forOrientation:NSLayoutConstraintOrientationHorizontal];
   [name setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [code addConstraint:[code.widthAnchor constraintGreaterThanOrEqualToConstant:40]];
   [row addConstraints:@[
     [code.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:2],
-    [code.widthAnchor constraintGreaterThanOrEqualToConstant:40],
     [name.leadingAnchor constraintEqualToAnchor:code.trailingAnchor constant:8],
-    [name.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+    [row.trailingAnchor constraintEqualToAnchor:name.trailingAnchor],
     [name.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     [name.firstBaselineAnchor constraintEqualToAnchor:code.firstBaselineAnchor]]];
   GTK4NativeView *rowBridge = [[GTK4NativeView alloc] initWithView:row scale:1];
+  gtk_widget_set_hexpand(rowBridge.widget,TRUE);
+  gtk_widget_set_size_request(rowBridge.widget,-1,21);
   gtk_window_set_child(GTK_WINDOW(window),rowBridge.widget);
   for (int pass = 0; pass < 12; pass++) {
     [name setStringValue:pass % 2 ? @"aVeryLongGlyphNameThatNeedsEllipsisInANarrowSidebar" : @"icomb"];
     [rowBridge synchronize];
-    gtk_window_set_default_size(GTK_WINDOW(window),pass % 3 == 0 ? 180 : pass % 3 == 1 ? 440 : 270,90);
+    gtk_window_set_default_size(GTK_WINDOW(window),pass % 3 == 0 ? 180 : pass % 3 == 1 ? 440 : 270,21);
     pump();
     GtkWidget *nc = [rowBridge widgetForView:code], *nn = [rowBridge widgetForView:name];
     PangoLayoutIter *iter = pango_layout_get_iter(gtk_label_get_layout(GTK_LABEL(nn)));

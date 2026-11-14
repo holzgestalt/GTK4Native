@@ -7,6 +7,7 @@
 {
   GTK4NativeWindowDecorationView *_host; // owned by the host
   NSMutableDictionary *_peers;
+  NSMutableDictionary *_scrollPeers;
   NSArray *_rects;
 }
 - (id)initWithHost:(GTK4NativeWindowDecorationView *)host;

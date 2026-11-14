@@ -131,7 +131,7 @@ int main(void)
     cairo_destroy(cr); cairo_surface_destroy(output); cairo_surface_destroy(source);
   }
   [outer setDocumentView:[[[NSView alloc] initWithFrame:NSMakeRect(0,0,400,300)] autorelease]]; pump(.2);
-  CHECK(gtk_widget_get_first_child(host->_nativeContent)==NULL,@"detaching page removes native table clip");
+  CHECK(host->_nativeTables.count==0,@"detaching page removes native table clip");
   [table setDelegate:nil]; [table setDataSource:nil]; [data release];
   [window close]; [window release];
   NSLog(@"PASS: nested native table clipping, physical sentinel pixels, full viewport preservation, hiding, resize and detach");
