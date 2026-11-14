@@ -1,11 +1,9 @@
+shared = no
 include $(GNUSTEP_MAKEFILES)/common.make
-BUNDLE_NAME = GTK4Native
-BUNDLE_EXTENSION = .theme
-GTK4Native_PRINCIPAL_CLASS = GTK4NativeTheme
-GTK4Native_OBJC_FILES = GTK4NativeTheme.m GTK4NativeMenu.m GTK4NativeFilePanel.m GTK4NativeWindow.m GTK4NativeView.m GTK4NativeTable.m
-GTK4Native_C_FILES = GTK4Renderer.c
-GTK4Native_INSTALL_DIR = $(GNUSTEP_LIBRARY)/Themes
+LIBRARY_NAME = libgnustep-theme-GTK4Native
+libgnustep-theme-GTK4Native_OBJC_FILES = GTK4NativeTheme.m GTK4NativeMenu.m GTK4NativeFilePanel.m GTK4NativeWindow.m GTK4NativeView.m GTK4NativeTable.m
+libgnustep-theme-GTK4Native_C_FILES = GTK4Renderer.c
+ADDITIONAL_INCLUDE_DIRS += -I../GNUstep -I../../src/libs-gui/Source -I../../src/libs-gui/Headers -I../../src/libs-gui/Headers/Additions
 ADDITIONAL_OBJCFLAGS = $(shell pkg-config --cflags gtk4)
 ADDITIONAL_CFLAGS = $(shell pkg-config --cflags gtk4)
-ADDITIONAL_GUI_LIBS = $(shell pkg-config --libs gtk4-x11 xext)
-include $(GNUSTEP_MAKEFILES)/bundle.make
+include $(GNUSTEP_MAKEFILES)/library.make

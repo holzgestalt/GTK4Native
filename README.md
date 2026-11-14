@@ -1,7 +1,10 @@
-> This workspace now compiles GTK4Native directly into AppKit with
-> `bash scripts/build-gtk4.sh`. It inherits `GSGNUstepTheme`; runtime `-GSTheme`
-> options and bundle installation no longer select the appearance. The standalone
-> bundle workflow and runtime-selection examples below describe the older build.
+> GTK4Native is now an application-linked static provider. AppKit contains no
+> GTK4Native or GNUstep appearance classes. Build with
+> `bash scripts/build-editglyphdata.sh`, or build the archive with
+> `bash scripts/build-themes.sh GTK4Native` and link using
+> `native/application-theme.make` / `scripts/theme-config.py GTK4Native --libs`.
+> It inherits the external `native/GNUstep` provider for fallback drawing.
+> Bundle installation and AppKit-theme build instructions below are historical.
 
 # GTK4 control drawing for GNUstep
 

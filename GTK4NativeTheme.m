@@ -1,5 +1,5 @@
 #import <AppKit/AppKit.h>
-#import <GNUstepGUI/GSGNUstepTheme.h>
+#import "GSGNUstepTheme.h"
 #import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4Renderer.h"
 #import "GTK4NativeMenu.h"
@@ -640,3 +640,8 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
   return _available && GTK4ShowNativeMenu(menu, rect, window);
 }
 @end
+
+Class GSThemeProvider_GTK4Native(void)
+{
+  return [GTK4NativeTheme class];
+}
