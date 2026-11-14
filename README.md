@@ -606,3 +606,19 @@ The native-window regression tests real toolbar-to-editor clicks and typing.
 EditGlyphData's full-file regression also types in a detail field after native
 sidebar navigation and after adding a glyph with the real native plus button,
 and verifies programmatic refocusing of an already active AppKit field editor.
+
+### Closing individual native windows
+
+Desktop window managers list GTK hosts in `_NET_CLIENT_LIST_STACKING`, while
+AppKit owns their embedded backend children. The backend's ordered-window list
+can therefore omit all of the application's windows. NSApplication now decides
+whether the last main window closed from its own window registry, counting
+visible, miniaturized and application-hidden windows. It rechecks when the
+delayed quit callback runs, so a newly opened window also prevents an obsolete
+quit request. The existing delegate/default policy still applies after the
+actual last main window closes.
+
+EditGlyphData's native-close test installs this host-only stacking list under
+Xvfb. Without it, a bare X server's fallback list masks the failure. The test
+checks document isolation, close notifications, surviving mapped GTK hosts,
+edited-document Discard, and actual last-window termination.
