@@ -3,6 +3,7 @@
 #import "GTK4NativeWindow.h"
 #import "GTK4NativeMenu.h"
 #import "GTK4NativeTable.h"
+#import "GTK4NativeControls.h"
 #import <GNUstepGUI/GSToolbarView.h>
 
 // Keep the AppKit view attached for toolbar ownership and validation.
@@ -250,7 +251,7 @@ static GtkWidget *toolbarImage(NSImage *image, int scale)
   g_bytes_unref(bytes);
   if (!texture) return NULL;
   GtkWidget *widget = gtk_image_new_from_paintable(GDK_PAINTABLE(texture));
-  gtk_image_set_pixel_size(GTK_IMAGE(widget), 24);
+  gtk_image_set_pixel_size(GTK_IMAGE(widget), iconSize);
   g_object_unref(texture);
   return widget;
 }
@@ -283,10 +284,31 @@ static void hostFocus(GObject *host, GParamSpec *spec, gpointer data)
   XFlush(display);
 }
 
+// Preserve AppKit's Return default-action contract while GTK owns focus.
+// GtkCheckButton otherwise consumes Return as its own toggle key binding.
+static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyval,
+  guint keycode, GdkModifierType state, gpointer data)
+{
+  GTK4NativeWindowDecorationView *view = data;
+  if ((keyval != GDK_KEY_Return && keyval != GDK_KEY_KP_Enter)
+      || (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK | GDK_META_MASK))) return FALSE;
+  GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
+  if (!focus || !gtk_widget_is_ancestor(focus, view->_nativeContent)) return FALSE;
+  // Native text entries retain their own activate signal and editing action.
+  for (GtkWidget *widget = focus; widget && widget != view->_nativeContent; widget = gtk_widget_get_parent(widget))
+    if (GTK_IS_EDITABLE(widget) || GTK_IS_POPOVER(widget)) return FALSE;
+  GtkWidget *button = gtk_window_get_default_widget(GTK_WINDOW(view->_host));
+  return button && gtk_widget_is_sensitive(button) && gtk_widget_get_mapped(button)
+    ? gtk_widget_activate(button) : FALSE;
+}
+
 static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent *event, gpointer data)
 {
   GTK4NativeWindowDecorationView *view = data;
   GdkEventType type = gdk_event_get_event_type(event);
+  // Popovers have their own native surface and coordinates. Their events must
+  // stay in GTK rather than being tested against the AppKit child cutouts.
+  if (gdk_event_get_surface(event) != gtk_native_get_surface(GTK_NATIVE(view->_host))) return FALSE;
   if (type == GDK_KEY_PRESS || type == GDK_KEY_RELEASE) return !nativeToolbarHasFocus(view);
   double x, y, dx, dy;
   if (!gdk_event_get_position(event, &x, &y)) return FALSE;
@@ -296,6 +318,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   // gestures claim the same pointer sequence on the ancestor surface.
   graphene_rect_t bounds;
   if (!gtk_widget_compute_bounds(gtk_window_get_child(GTK_WINDOW(view->_host)), view->_host, &bounds)) return FALSE;
+  if ([view->_nativeControls containsPoint:NSMakePoint(x, y - bounds.origin.y)]) return FALSE;
   for (GTK4NativeTable *peer in [view->_nativeTables allObjects]) {
     NSRect native = [peer hostRect];
     if (!NSIsEmptyRect(native) && NSPointInRect(NSMakePoint(x, y - bounds.origin.y), native)) return FALSE;
@@ -365,6 +388,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     // The empty GTK content establishes layout; the AppKit X11 child covers it.
     _nativeContent = gtk_fixed_new();
     _nativeTables = [[NSHashTable weakObjectsHashTable] retain];
+    _nativeControls = [[GTK4NativeControls alloc] initWithHost:self];
     GtkWidget *contentOverlay = gtk_overlay_new();
     GtkWidget *background = gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
     gtk_widget_add_css_class(background,"view");
@@ -379,6 +403,10 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     gtk_event_controller_set_propagation_phase(contentEvents, GTK_PHASE_CAPTURE);
     g_signal_connect(contentEvents, "event", G_CALLBACK(hostContentEvent), self);
     gtk_widget_add_controller(_host, contentEvents);
+    GtkEventController *defaultKeys = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(defaultKeys, GTK_PHASE_CAPTURE);
+    g_signal_connect(defaultKeys, "key-pressed", G_CALLBACK(controlDefaultKey), self);
+    gtk_widget_add_controller(_host, defaultKeys);
     g_signal_connect(_host, "map", G_CALLBACK(GTK4NativeRoundWindowCorners), NULL);
     g_signal_connect(_host, "close-request", G_CALLBACK(hostClose), self);
     g_signal_connect(_host, "notify::is-active", G_CALLBACK(hostActive), self);
@@ -773,7 +801,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     if (gtk_window_get_modal(GTK_WINDOW(_host)) != modal)
       gtk_window_set_modal(GTK_WINDOW(_host), modal);
     [self updateNativeToolbar];
-    NSMutableArray *nativeRects = [NSMutableArray array];
+    NSMutableArray *nativeRects = [NSMutableArray arrayWithArray:[_nativeControls update]];
     for (GTK4NativeTable *peer in [_nativeTables allObjects]) {
       if ([peer update] && !NSIsEmptyRect([peer hostRect]))
         [nativeRects addObject:[NSValue valueWithRect:[peer hostRect]]];
@@ -916,6 +944,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
 {
   for (GTK4NativeTable *peer in [_nativeTables allObjects]) [peer invalidate];
   [_nativeTables release]; [_nativeTableRects release];
+  [_nativeControls release];
   [_hostTimer invalidate];
   [_toolbarSignature release];
   if (_host) {

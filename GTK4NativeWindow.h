@@ -6,6 +6,8 @@ GtkWindow *GTK4NativeHostForWindow(NSWindow *window);
 void GTK4NativeRoundWindowCorners(GtkWidget *widget, gpointer unused);
 double GTK4NativeWindowCornerRadius(GtkWidget *widget);
 
+@class GTK4NativeControls;
+
 @interface GTK4NativeWindowDecorationView : GSWindowDecorationView
 {
 @public
@@ -13,6 +15,7 @@ double GTK4NativeWindowCornerRadius(GtkWidget *widget);
   GtkWidget *_header;
   GtkWidget *_nativeContent;
   NSHashTable *_nativeTables;
+  GTK4NativeControls *_nativeControls;
   NSArray *_nativeTableRects;
   GtkWidget *_nativeToolbar;
   GtkWidget *_nativeToolbarItems;

@@ -1,4 +1,5 @@
 #import "GTK4NativeTable.h"
+#import "GTK4NativeClip.h"
 #import "GTK4NativeWindow.h"
 
 @interface NSTableView (GTK4NativeTablePrivate)
@@ -188,7 +189,9 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   g_object_ref_sink(peer->_scroller);
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(peer->_scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->_scroller), peer->_list);
-  gtk_fixed_put(GTK_FIXED(host->_nativeContent), peer->_scroller, 0, 0);
+  peer->_clip = GTK4NativeClipNew(peer->_scroller);
+  g_object_ref_sink(peer->_clip);
+  gtk_fixed_put(GTK_FIXED(host->_nativeContent), peer->_clip, 0, 0);
   [host->_nativeTables addObject:peer];
   [[NSNotificationCenter defaultCenter] addObserver:peer selector:@selector(selectionChanged:)
     name:[table isKindOfClass:[NSOutlineView class]] ? NSOutlineViewSelectionDidChangeNotification
@@ -252,7 +255,9 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   graphene_rect_t body;
   visible = visible && gtk_widget_get_height(_host->_nativeContent) > 0
     && gtk_widget_compute_bounds(_host->_nativeContent,_host->_host,&body);
-  gtk_widget_set_visible(_scroller, visible);
+  NSRect visibleRect = scroll ? NSIntersectionRect([scroll bounds], [scroll visibleRect]) : NSZeroRect;
+  visible = visible && !NSIsEmptyRect(visibleRect);
+  gtk_widget_set_visible(_clip, visible);
   if (!visible) { _hostRect = NSZeroRect; return YES; }
   CGFloat factor = [[_table window] userSpaceScaleFactor] / MAX(1,gtk_widget_get_scale_factor(_host->_host));
   if (fabs(_scale-factor) > .001) {
@@ -262,23 +267,31 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   // Map from the AppKit decoration's window coordinates into the GTK body.
   // The body may also contain an AppKit menu above the content view, so its
   // origin cannot be inferred from contentView.bounds alone.
-  NSRect rect = [scroll convertRect:[scroll bounds] toView:_host];
+  NSRect full = [scroll convertRect:[scroll bounds] toView:_host];
+  NSRect rect = [scroll convertRect:visibleRect toView:_host];
   NSRect bounds = [_host bounds];
-  NSRect nextRect = NSMakeRect((NSMinX(rect)-NSMinX(bounds)) * _scale - body.origin.x,
-    ([_host isFlipped] ? NSMinY(rect)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(rect)) * _scale - body.origin.y,
+  NSRect nextFullRect = NSMakeRect((NSMinX(full)-NSMinX(bounds))*_scale-body.origin.x,
+    ([_host isFlipped] ? NSMinY(full)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(full))*_scale-body.origin.y,
+    NSWidth(full)*_scale, NSHeight(full)*_scale);
+  NSRect nextRect = NSMakeRect((NSMinX(rect)-NSMinX(bounds))*_scale-body.origin.x,
+    ([_host isFlipped] ? NSMinY(rect)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(rect))*_scale-body.origin.y,
     NSWidth(rect)*_scale, NSHeight(rect)*_scale);
-  if (!NSEqualRects(_hostRect, nextRect)) {
-    _hostRect = nextRect;
-    gtk_fixed_move(GTK_FIXED(_host->_nativeContent), _scroller, NSMinX(_hostRect), NSMinY(_hostRect));
-    gtk_widget_set_size_request(_scroller, MAX(1, floor(NSWidth(_hostRect))), MAX(1, floor(NSHeight(_hostRect))));
+  if (!NSEqualRects(_hostRect,nextRect) || !NSEqualRects(_fullHostRect,nextFullRect)) {
+    _hostRect = nextRect; _fullHostRect = nextFullRect;
+    gtk_fixed_move(GTK_FIXED(_host->_nativeContent), _clip, NSMinX(_hostRect), NSMinY(_hostRect));
+    gtk_widget_set_size_request(_clip, MAX(1,lround(NSWidth(_hostRect))), MAX(1,lround(NSHeight(_hostRect))));
+    GtkAllocation allocation = {lround(NSMinX(_fullHostRect)-NSMinX(_hostRect)),
+      lround(NSMinY(_fullHostRect)-NSMinY(_hostRect)),
+      MAX(1,lround(NSWidth(_fullHostRect))), MAX(1,lround(NSHeight(_fullHostRect)))};
+    GTK4NativeClipSetAllocation(_clip,allocation);
   }
   for (GTK4NativeRow *row in [_rows allObjects]) {
     if (!row->_bound || !row->_box) continue;
     graphene_rect_t allocated;
     if (gtk_widget_get_width(row->_box) <= 0 || gtk_widget_get_height(row->_box) <= 0
-        || !gtk_widget_compute_bounds(row->_box,_scroller,&allocated)
+        || !gtk_widget_compute_bounds(row->_box,_clip,&allocated)
         || allocated.origin.y + allocated.size.height <= 0
-        || allocated.origin.y >= gtk_widget_get_height(_scroller)) continue;
+        || allocated.origin.y >= gtk_widget_get_height(_clip)) continue;
     // GTK prefetches list items well outside the viewport. Their lightweight
     // placeholders need no Objective-C template/bindings until actually seen.
     if (row->_pending) populateRow(self,row);
@@ -302,11 +315,15 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   for (GTK4NativeRow *row in [_rows allObjects]) row->_peer = nil;
   if (_selection) g_signal_handlers_disconnect_by_data(_selection,self);
   if (_list) g_signal_handlers_disconnect_by_data(_list,self);
-  if (_scroller && gtk_widget_get_parent(_scroller)) gtk_widget_unparent(_scroller);
+  if (_clip) {
+    GTK4NativeClipSetChild(_clip,NULL);
+    if (gtk_widget_get_parent(_clip)) gtk_widget_unparent(_clip);
+  }
 }
 - (void)dealloc
 {
   [self invalidate];
+  if (_clip) g_object_unref(_clip);
   if (_scroller) g_object_unref(_scroller);
   if (_selection) g_object_unref(_selection);
   if (_model) g_object_unref(_model);

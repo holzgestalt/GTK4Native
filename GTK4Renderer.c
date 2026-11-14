@@ -78,6 +78,9 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
     r->scrollbars[i] = gtk_scrollbar_new(i == 0 ? GTK_ORIENTATION_HORIZONTAL
                                               : GTK_ORIENTATION_VERTICAL, NULL);
     gtk_widget_add_css_class(r->scrollbars[i], i == 0 ? "bottom" : "right");
+    gboolean overlay = TRUE;
+    g_object_get(gtk_settings_get_default(), "gtk-overlay-scrolling", &overlay, NULL);
+    if (overlay) gtk_widget_add_css_class(r->scrollbars[i], "overlay-indicator");
     gtk_fixed_put(GTK_FIXED(box), r->scrollbars[i], 0, 0);
   }
   gtk_fixed_put(GTK_FIXED(box), r->button, 0, 0);

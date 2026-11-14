@@ -218,3 +218,85 @@ References used during implementation:
 - [GTK widget snapshots](https://docs.gtk.org/gtk4/method.Widget.snapshot_child.html)
 - [GTK WidgetPaintable](https://docs.gtk.org/gtk4/class.WidgetPaintable.html)
 - [GTK4 migration guide](https://docs.gtk.org/gtk4/migrating-3to4.html)
+
+## Standalone native button and selection controls
+
+Live row translation alone did not make ordinary NSButton controls native.
+`GTK4NativeControls` now discovers supported control leaves below a window's
+content view and embeds them in the existing GTK body, sharing its X11 cutout
+publication and focus routing with native tables. It skips table descendants
+and custom drawing/mouse-handler overrides. Clip allocation is independent of
+GTK child natural sizes, so scrolling or a partly visible control cannot grow
+the host or paint over neighboring AppKit content. Native peers retain source
+views only while attached and recreate on structural or scale changes.
+
+Indicator image names are aliases: comparing `[image name]` with `NSSwitch` or
+`NSRadioButton` misclassified standard checkbox/radio cells. Compare with the
+canonical `imageNamed:` object instead. Poll state through typed NSButtonCell
+references: this build's NSButton state forwarding otherwise asks its untyped
+cell for an unsigned NSSwitch-style selector and the runtime warns each tick.
+Switch state uses integerValue, keeping its unsigned state API out of that path.
+
+A clipping GtkWidget can outlive its peer through GTK's in-flight frame refs.
+Releasing the bridge first unparented its child while the clip still held a raw
+pointer, failing the next snapshot. Peer teardown must clear the clip's child
+and unparent it explicitly before releasing the bridge. Dynamic segmented
+tracking-mode changes reproduce this failure without that order.
+
+GtkCheckButton consumes Return to toggle itself before GtkWindow's default
+activation. A native capture key controller preserves AppKit's Return-default
+contract for hosted button/selection focus while excluding native text entries.
+Actions still use NSControl sendAction so value bindings reverse normally and
+the original control remains the sender. The source cell defines the checkbox
+cycle (mixed→on→off→mixed here), rather than hard-coding a different cycle.
+
+`native-buttons-test.m` uses real pointer and keyboard events for all 14 bezel
+styles, mixed checkbox cycling, radio exclusivity, switches, segment tracking
+modes, disabled input and Return defaults. It also checks synchronization,
+scroll clipping/input coordinates, detach/reattach, resize and close. The
+script runs light, dark, 2× and 1.5× plus existing native view/window checks.
+
+Wheel events in a native cutout no longer reach the enclosing AppKit scroll
+view automatically. A GTK scroll controller forwards wheel/smooth deltas and
+modifiers to that source scroll view; surface-unit deltas account for the
+AppKit/GDK scale ratio and configured line steps. The real-input test scrolls
+with the pointer over a disabled native button, then clicks a newly revealed
+control. GTK clicked-signal counters also prove that native buttons, including
+every bezel variant, receive the pointer sequence rather than the backing
+AppKit views.
+
+## Dropdowns, narrow scrollbar indicators and nested table clipping
+
+NSPopUpButton's selected NSMenuItem carries the cell's canonical common_Nibble
+arrow image. Rejecting all item images silently rejected ordinary selection
+popups. Flat selection popups now translate to GtkDropDown; actual custom
+images/separators/submenus and pull-down menus retain existing tracking. The
+source menu item action preserves the cell's selection-binding reverse updates,
+with setControlView established before routing the action. GObject can re-emit
+notify::selected after resetting a disabled choice; ignoring an index already
+selected in the source prevents duplicate actions from that queued notification.
+
+GtkPopover events use a different native surface and coordinate origin. The
+host must leave these in GTK instead of testing popup-relative pointer positions
+against AppKit content holes. Native Return-default handling also excludes
+popover focus. Source menu titles/enabled states are synchronized into GTK, and
+factories retain the source independently of bridge callback lifetimes.
+
+GTK's overlay-indicator CSS provides thin, transparent-track scrollbar snapshots.
+It is selected only when gtk-overlay-scrolling is enabled. In the installed GTK
+CSS its resting color does not change for pressed/disabled state flags alone;
+hovering/dragging classes belong to live GtkScrolledWindow behavior. Tests now
+check thickness against a regular GTK scrollbar, transparent pixels away from
+the thumb, geometry/proportion changes, scaling and source input behavior instead
+of requiring every native CSS state to have different pixels. AppKit still
+reserves the narrow scroller width and owns tracking; fading/hover expansion are
+not introduced by this appearance change.
+
+Native tables previously used their enclosing NSScrollView's entire bounds for
+both GTK allocation and the X11 hole, so outer scroll views could not clip them.
+GTK4NativeClip is now shared by tables and controls. The table clip/hole follows
+visibleRect while the GtkScrolledWindow keeps its original full allocation and
+scroll adjustment page, offset behind the clip. Cropping the scroller allocation
+itself would change the visible row count and cause scrolling/layout jumps.
+Tests sample magenta AppKit sentinels outside both viewport edges and verify
+clipping, full-size allocation, hiding, resize and detachment at 1x/2x/1.5x.

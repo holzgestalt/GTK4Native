@@ -10,9 +10,10 @@
 
 This is the first working part of a GTK4 platform integration. GNUstep
 applications continue to use NSButton and NSTextField. A GSTheme subclass asks
-GTK4 to render their frames/backgrounds using its selected GTK theme. These are
-GTK-rendered control surfaces, not embedded GTK widgets. No replica CSS, theme
-images, or hand-picked widget colors are used.
+GTK4 to render their frames/backgrounds using its selected GTK theme. Supported buttons and selection controls in native windows are live GTK
+widgets, as are supported table rows. Other controls use GTK snapshots or
+AppKit fallback. No replica CSS, theme images, or hand-picked widget colors are
+used.
 
 ## Standalone repository build
 
@@ -74,23 +75,60 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 
 | Area | Implemented | Still needed |
 | --- | --- | --- |
-| Push buttons | GTK background/frame, pressed, disabled and keyboard-focus flags | Hover tracking, native metrics, default action, custom bezels |
+| Push buttons | Live GtkButton/GtkToggleButton in native windows: images/titles, hover, press, focus, disabled/toggle states and Return default action; all 14 gallery bezel samples | Custom input/drawing overrides retain fallback; AppKit still assigns frames |
 | Text fields | Full GTK frame/focus snapshots, native padding, transparent editor; custom colors fall back | Native editing, selection/caret styling, IME and accessibility integration |
 | Colors | GTK symbolic colors mapped into AppKit's System palette | Live GTK setting changes, per-state text colors |
 | Scaling | Cairo device scale and AppKit destination size; tested at 2x | Desktop fractional-scale validation |
 | Window decoration | GTK top-level hosts for titled X11/XWayland windows; native titlebar controls and themed rounded frames | Native Wayland content backend; advanced window-style transitions |
-| Checkboxes/radio buttons | AppKit fallback | GTK indicator rendering and state mapping |
+| Checkboxes/radio matrices | Live GtkCheckButton indicators, off/on/mixed checkbox states, grouped NSMatrix radios, native input and original target/action senders | Non-radio matrices and custom cells |
+| Switches/segments | Live GtkSwitch and linked native segment buttons; select-one, select-any, momentary and disabled segments | Segment popup menus and additional segment-style mappings |
 | Sliders/progress/steppers | AppKit fallback | GTK renderers, measurements and interaction states |
-| Menus | Real GTK dropdown/context/positioned menus on X11, with native layout, text, checkmarks, separators and nested submenus; menu bar surfaces use snapshots | Native menubar hosting, Wayland attachment, NSPopUpButton lifecycle |
+| Menus and choices | Live GtkDropDown for flat text NSPopUpButton selection menus, with selection bindings and item updates; real GTK dropdown/context/positioned menus on X11 | Pull-down/complex NSPopUpButton surfaces, native menubar hosting, Wayland attachment |
 | Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
 | Scrollers | Whole GtkScrollbar snapshots, GTK thickness and thumb geometry, disabled/pressed states, GTK trough-click preference | Native GTK input/accessibility hosting, hover, overlay fading |
 | Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables, arbitrary AppKit custom drawing |
 | Tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
-The sample's label and text, control events, field editor, keyboard navigation,
-layout and accessibility remain AppKit implementations. No claim of native GTK
-input semantics or full basic-control coverage is made yet.
+Hosted button/selection controls use GTK rendering, input, focus, and accessibility;
+the AppKit objects keep model state, bindings, target/action, and frame layout.
+Text editing and other fallback controls still use their existing AppKit
+implementations. This does not claim native coverage of all control families.
+
+## Buttons & Selection gallery
+
+Rebuild the gallery to link the updated static provider:
+
+```bash
+source env.sh
+make -C examples/ControlGallery -j4
+openapp ./examples/ControlGallery/ControlGallery.app
+bash native/GTK4Native/scripts/test-buttons.sh
+```
+
+`GTK4NativeControls` automatically discovers supported controls in ordinary
+window content, including controls inside AppKit scroll views and tab pages.
+Its clipped native regions participate in the existing X11 host cutouts. Peers
+follow visibility, scrolling, scale and geometry changes and are removed when
+source views detach. Native table rows continue to use their own view bridges.
+Custom-drawn/custom-mouse-handler subclasses and controls with explicit context
+menus retain their existing AppKit behavior. Wheel input over native controls
+continues to scroll their enclosing AppKit scroll view.
+
+GTK4NativeView maps the gallery's button bezel variants onto ordinary GTK
+buttons, with GTK circular/flat classes and symbolic help/disclosure icons
+where appropriate. It does not reproduce macOS-specific bezel artwork. Checkboxes
+follow the source cell's mixed-state cycle; radio matrices keep exclusive
+selection. Native actions use the original AppKit control as sender and pass
+through NSControl's binding/target-action path. Return activates the visible
+enabled native default button even when a checkbox has keyboard focus; native
+text entries keep their editing activation.
+
+The dedicated suite uses real XTest pointer/keyboard events, tests all 14
+bezels and selection families, programmatic state synchronization, scrolling,
+detachment, resizing and teardown, and runs in light/dark, 2× and fractional
+1.5× modes. It also runs the existing compound-view and native-window regressions.
+Logs and actual host-window PNG captures are in `build/gtk4-buttons`.
 
 ## GNUstep change
 
@@ -236,8 +274,9 @@ handles, and requires an X11 GDK display plus the X Shape extension. The theme
 prefers X11 only when AppKit uses X11, GTK has no display yet and GDK_BACKEND is
 unset; the standalone renderer never selects a backend. Explicit GDK_BACKEND
 settings still win. Unsupported backends/displays and customized GNUstep command,
-alternate or control key mappings retain AppKit tracking. The menu bar itself is still AppKit-hosted and standard
-NSPopUpButton controls retain their existing lifecycle. Native menu-bar hosting,
+alternate or control key mappings retain AppKit tracking. The menu bar itself is still AppKit-hosted. Flat selection NSPopUpButton controls
+now use live GtkDropDown widgets; pull-down and complex menus keep this existing
+menu-tracking path. Native menu-bar hosting,
 Wayland foreign-window attachment and full live menu-model synchronization remain
 separate work.
 
@@ -355,12 +394,43 @@ normal test script runs these cases. To exercise EditGlyphData at 200%:
 GDK_SCALE=2 XVFB_SCREEN=2560x2048x24 bash scripts/test-editglyphdata.sh
 ```
 
+## Selection popups and nested scroll-view clipping
+
+Plain, non-pull-down `NSPopUpButton` controls use a live `GtkDropDown`, including
+the ControlGallery section selector. The GTK string model follows source titles,
+item insertion/removal and enabled states. User selection goes through the menu
+item's normal action route, preserving selected-index/tag/value bindings and the
+original popup action sender. Programmatic updates are silent; resetting a
+rejected disabled selection does not generate a second action. Popover-surface
+events remain in GTK, and Return inside a popup does not activate the window's
+default button. Separators, submenus, custom images and pull-down menus retain
+the existing menu implementation. GNUstep's automatically attached arrow image
+is not mistaken for a custom item image.
+
+Native table/outline peers now use the same GTK clip container as standalone
+controls. The clip and X11 drawing/input cutout follow the enclosing scroll
+view's `visibleRect`, including clipping by outer scroll views. The contained
+GtkScrolledWindow retains its full viewport allocation and gets a negative
+offset when partially clipped, avoiding changes to its scroll page/selection
+layout. Fully clipped or detached tables stop exposing native regions. Native
+row population is also limited to the clipped viewport.
+
+`bash native/GTK4Native/scripts/test-scroll-layout.sh` checks thin transparent
+indicator rendering, source scroller interactions and nested table clipping in
+light/dark, 2× and fractional 1.5× modes. Pixel sentinels outside the outer
+viewport verify vertical and horizontal clipping. The button suite additionally
+checks real dropdown mouse/keyboard selection, bindings, disabled choices and
+model updates.
+
 ## GTK scrollbars
 
 `NSScroller` now snapshots an actual `GtkScrollbar` for each orientation, with a
 `GtkAdjustment` synchronized from its normalized value and knob proportion.
-GTK supplies the complete track/slider rendering, CSS spacing, minimum thumb
-length, and natural thickness. There are no hand-drawn GTK scrollbar parts or
+GTK supplies the slider rendering, CSS spacing, minimum thumb length and
+natural thickness. When GTK's overlay-scrolling setting is enabled, the renderer
+uses GTK's `overlay-indicator` class: a narrow thumb and transparent track. The
+old thumb is erased using the owning scroll view's background rather than a
+separate control-colored gutter. GTK4Native also omits AppKit's inner divider. There are no hand-drawn GTK scrollbar parts or
 legacy arrow buttons. Geometry comes from the allocated GTK range, trough and
 slider widgets; unsupported GTK widget hierarchies or allocations use the
 existing AppKit path. Light/dark theme colors and AppKit's backing scale apply
@@ -381,11 +451,11 @@ an explicit `GSScrollerScrollsByPage` override remains supported.
 
 These are GTK-rendered controls in AppKit views. AppKit retains event tracking,
 target/action dispatch, wheel scrolling, document clipping, and autohiding.
-This first implementation uses always-visible, space-reserving scrollbar
-surfaces rather than GtkScrolledWindow's fading overlay indicators. It does not
+The indicators remain always visible and reserve their narrow width in AppKit
+layout; GtkScrolledWindow's live hover expansion and fading are separate work. It does not
 embed GTK input surfaces or provide GTK gestures/accessibility/hover. GTK4 has no
 supported GtkSocket/GtkPlug-style foreign widget embedding API; doing that needs
-a separate window/input-hosting design.
+a native-scroll-surface extension to the existing window/input host.
 
 `renderer-test.c` checks both orientations, movement, page proportions, minimum
 thumb size, pressed/disabled states, 2x output, and an unmapped snapshot host.

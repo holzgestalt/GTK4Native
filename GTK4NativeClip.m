@@ -1,0 +1,86 @@
+#import "GTK4NativeClip.h"
+#include <math.h>
+#include <string.h>
+
+// Fixed-size clipping container: GTK's child natural size must not enlarge an
+// AppKit viewport or expose the portion scrolled outside it.
+typedef struct {
+  GtkWidget parent;
+  GtkWidget *child;
+  GtkAllocation allocation;
+} GTK4Clip;
+typedef struct { GtkWidgetClass parent; } GTK4ClipClass;
+G_DEFINE_TYPE(GTK4Clip, gtk4_native_clip, GTK_TYPE_WIDGET)
+static void clipMeasure(GtkWidget *widget, GtkOrientation orientation, int forSize,
+  int *minimum, int *natural, int *minimumBaseline, int *naturalBaseline)
+{
+  *minimum = *natural = 0;
+  if (minimumBaseline) *minimumBaseline = -1;
+  if (naturalBaseline) *naturalBaseline = -1;
+}
+static void clipAllocate(GtkWidget *widget, int width, int height, int baseline)
+{
+  GTK4Clip *clip = (GTK4Clip *)widget;
+  if (clip->child) {
+    GtkAllocation allocation = clip->allocation;
+    int minimumWidth = 0, minimumHeight = 0;
+    gtk_widget_measure(clip->child, GTK_ORIENTATION_HORIZONTAL, -1, &minimumWidth, NULL, NULL, NULL);
+    int width = MAX(allocation.width, minimumWidth);
+    gtk_widget_measure(clip->child, GTK_ORIENTATION_VERTICAL, width, &minimumHeight, NULL, NULL, NULL);
+    int height = MAX(allocation.height, minimumHeight);
+    // Fixed AppKit frames can be smaller than GTK CSS padding. Allocate GTK
+    // safely at its minimum, centered behind the source's clipped rectangle.
+    allocation.x -= (width - allocation.width) / 2;
+    allocation.y -= (height - allocation.height) / 2;
+    allocation.width = width; allocation.height = height;
+    gtk_widget_size_allocate(clip->child, &allocation, -1);
+  }
+}
+static void clipSnapshot(GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  GTK4Clip *clip = (GTK4Clip *)widget;
+  if (clip->child) gtk_widget_snapshot_child(widget, clip->child, snapshot);
+}
+static void clipDispose(GObject *object)
+{
+  GTK4Clip *clip = (GTK4Clip *)object;
+  if (clip->child) { gtk_widget_unparent(clip->child); clip->child = NULL; }
+  G_OBJECT_CLASS(gtk4_native_clip_parent_class)->dispose(object);
+}
+static void gtk4_native_clip_class_init(GTK4ClipClass *cls)
+{
+  G_OBJECT_CLASS(cls)->dispose = clipDispose;
+  GTK_WIDGET_CLASS(cls)->measure = clipMeasure;
+  GTK_WIDGET_CLASS(cls)->size_allocate = clipAllocate;
+  GTK_WIDGET_CLASS(cls)->snapshot = clipSnapshot;
+}
+static void gtk4_native_clip_init(GTK4Clip *clip)
+{
+  gtk_widget_set_overflow(GTK_WIDGET(clip), GTK_OVERFLOW_HIDDEN);
+}
+
+GtkWidget *GTK4NativeClipNew(GtkWidget *child)
+{
+  GtkWidget *widget = g_object_new(gtk4_native_clip_get_type(), NULL);
+  GTK4NativeClipSetChild(widget, child);
+  return widget;
+}
+void GTK4NativeClipSetChild(GtkWidget *widget, GtkWidget *child)
+{
+  GTK4Clip *clip = (GTK4Clip *)widget;
+  if (clip->child == child) return;
+  GtkWidget *old = clip->child;
+  clip->child = NULL;
+  if (old) gtk_widget_unparent(old);
+  clip->child = child;
+  if (child) gtk_widget_set_parent(child, widget);
+  gtk_widget_queue_allocate(widget);
+}
+void GTK4NativeClipSetAllocation(GtkWidget *widget, GtkAllocation allocation)
+{
+  GTK4Clip *clip = (GTK4Clip *)widget;
+  if (memcmp(&clip->allocation, &allocation, sizeof(allocation))) {
+    clip->allocation = allocation;
+    gtk_widget_queue_allocate(widget);
+  }
+}

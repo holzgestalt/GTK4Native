@@ -97,3 +97,9 @@ done
 GDK_SCALE=2 LC_ALL=C xvfb-run -a -s '-screen 0 2560x2048x24' \
   timeout -k 2s 15s "$test_build_dir/native-window-test"
 GTK4_NATIVE_WINDOWS=0 xvfb-run -a timeout 15s "$test_build_dir/integration-test"
+
+# Standalone controls use live GTK peers, including real XTest input.
+bash "$plugin_root/scripts/test-buttons.sh"
+
+# Nested native surfaces and thin scroller appearance.
+bash "$plugin_root/scripts/test-scroll-layout.sh"

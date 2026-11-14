@@ -8,6 +8,8 @@
   NSTableView *_table; // Table owns the peer; never retained here.
   GTK4NativeWindowDecorationView *_host;
   GtkWidget *_scroller;
+  GtkWidget *_clip;
+  NSRect _fullHostRect;
   GtkWidget *_list;
   GListStore *_model;
   GtkSelectionModel *_selection;

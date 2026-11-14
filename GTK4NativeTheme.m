@@ -242,7 +242,8 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
     @"NSInterfaceStyleDefault": @"NSWindows95InterfaceStyle",
     @"NSMenuInterfaceStyle": @"NSWindows95InterfaceStyle",
     @"GSSuppressAppIcon": @YES,
-    @"GSBackHandlesWindowDecorations": @YES }];
+    @"GSBackHandlesWindowDecorations": @YES,
+    @"GSScrollViewNoInnerBorder": @YES }];
   // AppKit's X11 backend reports 72 DPI unconditionally. Use GDK's desktop
   // scale as a theme default before AppKit lays out windows and loads fonts.
   // Explicit GSScaleFactor values in argument/app/global domains still win.
@@ -439,7 +440,9 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
     state |= GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT;
   // Snapshot the complete GTK widget, not separately stretched CSS pieces.
   // AppKit's dirty-region clip still limits the final paint.
-  [[NSColor controlBackgroundColor] set];
+  // Erase the old thumb against the owning viewport, not a separate track.
+  NSScrollView *owner = [scroller enclosingScrollView];
+  [(owner ? [owner backgroundColor] : [NSColor controlBackgroundColor]) set];
   NSRectFill(NSIntersectionRect(rect, [scroller bounds]));
   return [self paintWidget:_renderer.scrollbars[horizontal ? 0 : 1]
                     state:state frame:[scroller bounds] view:scroller];
