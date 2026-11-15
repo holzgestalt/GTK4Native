@@ -222,6 +222,7 @@ static GtkWidget *toolbarImage(NSImage *image, int scale, int iconSize)
     {@"NSBluetoothTemplate", "bluetooth-symbolic"},
     {@"NSTouchBarPlayTemplate", "media-playback-start-symbolic"},
     {@"NSTouchBarRecordStopTemplate", "media-playback-stop-symbolic"},
+    {@"NSTouchBarPauseTemplate", "media-playback-pause-symbolic"},
     {@"NSTouchBarDeleteTemplate", "user-trash-symbolic"},
     {@"NSTouchBarSearchTemplate", "system-search-symbolic"},
     {@"NSTouchBarSidebarTemplate", "sidebar-show-symbolic"},
