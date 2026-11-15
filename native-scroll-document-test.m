@@ -91,10 +91,10 @@ int main(void)
   CHECK(GTK_IS_SCROLLED_WINDOW(native) && GTK_IS_BUTTON(child),@"whole document uses a real GTK scrolled window");
   GtkWidget *root=gtk_widget_get_parent(child);
   CHECK(GTK_IS_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager(root)),@"GTK owns the document constraint solver");
-  CHECK(host->_nativeTableRects.count==1,@"one stable viewport cutout replaces per-control cutouts");
+  CHECK(host->_nativeRegions.count==1,@"one stable viewport cutout replaces per-control cutouts");
   GtkAdjustment *v=gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(native));
   graphene_rect_t original=bounds(child,native);
-  NSArray *holes=[host->_nativeTableRects copy];
+  NSArray *holes=[host->_nativeRegions copy];
   // Disable host synchronization: GTK must scroll and paint correctly without
   // waiting for peer placement or publication of new X11 holes.
   host->_placing=YES;
@@ -103,7 +103,7 @@ int main(void)
   double offset=gtk_adjustment_get_value(v);
   graphene_rect_t moved=bounds(child,native);
   CHECK(fabs(moved.origin.y-original.origin.y+offset)<1.5,@"GTK moves the entire document in the same allocation");
-  CHECK([host->_nativeTableRects isEqual:holes],@"native scroll leaves the viewport cutout unchanged");
+  CHECK([host->_nativeRegions isEqual:holes],@"native scroll leaves the viewport cutout unchanged");
   CHECK(fabs(NSMinY(scroll.contentView.bounds)-offset/([window userSpaceScaleFactor]/gtk_widget_get_scale_factor(native)))<1.5,
     @"native scroll mirrors AppKit clip bounds");
   hiddenBacking(host,native);

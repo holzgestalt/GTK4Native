@@ -9,6 +9,8 @@ typedef struct {
   GtkWidget *child;
   GtkAllocation allocation;
   gboolean fill;
+  gboolean hasBackground;
+  GdkRGBA background;
 } GTK4Clip;
 typedef struct { GtkWidgetClass parent; } GTK4ClipClass;
 G_DEFINE_TYPE(GTK4Clip, gtk4_native_clip, GTK_TYPE_WIDGET)
@@ -45,6 +47,10 @@ static void clipAllocate(GtkWidget *widget, int width, int height, int baseline)
 static void clipSnapshot(GtkWidget *widget, GtkSnapshot *snapshot)
 {
   GTK4Clip *clip = (GTK4Clip *)widget;
+  if(clip->hasBackground) {
+    graphene_rect_t rect=GRAPHENE_RECT_INIT(0,0,gtk_widget_get_width(widget),gtk_widget_get_height(widget));
+    gtk_snapshot_append_color(snapshot,&clip->background,&rect);
+  }
   if (clip->child) gtk_widget_snapshot_child(widget, clip->child, snapshot);
 }
 static void clipDispose(GObject *object)
@@ -95,4 +101,23 @@ void GTK4NativeClipSetAllocation(GtkWidget *widget, GtkAllocation allocation)
     clip->allocation = allocation;
     gtk_widget_queue_allocate(widget);
   }
+}
+
+void GTK4NativeClipPlace(GtkWidget *widget,GtkWidget *fixed,GtkAllocation allocation)
+{
+  gtk_fixed_move(GTK_FIXED(fixed),widget,allocation.x,allocation.y);
+  gtk_widget_set_size_request(widget,allocation.width,allocation.height);
+  /* Size requests only schedule GTK's next layout phase. The AppKit child
+   * cutout is updated now, so its native replacement needs the new allocation
+   * now too. GtkFixed will retain the same geometry on its next frame. */
+  if(gtk_widget_get_visible(widget)) gtk_widget_size_allocate(widget,&allocation,-1);
+}
+
+void GTK4NativeClipSetBackground(GtkWidget *widget,const GdkRGBA *color)
+{
+  GTK4Clip *clip=(GTK4Clip *)widget;
+  if(clip->hasBackground==(color!=NULL) && (!color || gdk_rgba_equal(&clip->background,color))) return;
+  clip->hasBackground=color!=NULL;
+  if(color) clip->background=*color;
+  gtk_widget_queue_draw(widget);
 }

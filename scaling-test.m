@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSTheme.h>
+#import <GNUstepGUI/GSNativeView.h>
 #include <gtk/gtk.h>
 #include <assert.h>
 #include <math.h>
@@ -25,7 +26,9 @@ int main(void)
   assert(fabs(NSWidth(content)-320)<1);
   [window makeFirstResponder:field];
   NSTextView *editor=(NSTextView *)[window firstResponder];
-  assert([editor isKindOfClass:[NSTextView class]] && ![editor drawsBackground]);
+  id<GSNativeViewPeer> native=GSNativeViewPeerForView(field);
+  if(native) assert([window firstResponder]==field && [native focusNativeView:field]);
+  else assert([editor isKindOfClass:[NSTextView class]] && ![editor drawsBackground]);
   // The capture must preserve device pixel dimensions.
   NSView *view=[window contentView];
   NSBitmapImageRep *rep=[view bitmapImageRepForCachingDisplayInRect:[view bounds]];

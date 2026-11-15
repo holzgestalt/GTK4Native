@@ -149,7 +149,9 @@ int main(void)
   unsigned int count;
   XQueryTree(display, view->_child, &root, &parent, &children, &count);
   if (children) XFree(children);
-  assert(parent == view->_parent);
+  XWindowAttributes backendAttributes;
+  assert(parent == DefaultRootWindow(display));
+  assert(XGetWindowAttributes(display,view->_child,&backendAttributes) && backendAttributes.map_state != IsViewable);
   assert(gtk_widget_get_mapped(view->_host));
   {
     Atom type;
@@ -192,7 +194,7 @@ int main(void)
   [[window fieldEditor:NO forObject:field] insertText:@"Edited"];
   [window makeFirstResponder:nil];
   assert([[field stringValue] containsString:@"Edited"]);
-  // Real X11 pointer and keyboard events must reach AppKit through its child.
+  // Real host input reaches AppKit through the custom GTK content widget.
   void *xtst = dlopen("libXtst.so.6", RTLD_NOW);
   assert(xtst);
   int (*motion)(Display *, int, int, int, unsigned long) = dlsym(xtst, "XTestFakeMotionEvent");
@@ -293,8 +295,7 @@ int main(void)
   assert(delegate->toolbarClicks == 1);
   assert([delegate->toolbarSender isKindOfClass:[NSToolbarItem class]]);
   assert([[[delegate->toolbarSender toolbar] identifier] isEqual:@"native-test"]);
-  // Native controls and the embedded AppKit client are separate X11 focus
-  // owners. Clicking an editor must hand keyboard input back to the child.
+  // Both toolbar controls and the AppKit editor keep focus in the GTK window.
   point = [field convertPoint:NSMakePoint(80,15) toView:nil];
   XTranslateCoordinates(display,view->_child,DefaultRootWindow(display),
     lround(point.x),lround([window frame].size.height-point.y),&px,&py,&ignored);
@@ -304,7 +305,7 @@ int main(void)
   [[NSRunLoop currentRunLoop] addTimer:release forMode:NSDefaultRunLoopMode];
   button(display,1,True,CurrentTime); XFlush(display); pump(.2);
   Window focus; int revert; XGetInputFocus(display,&focus,&revert);
-  assert(focus == view->_child && gtk_root_get_focus(GTK_ROOT(view->_host)) == NULL);
+  assert(focus == view->_parent && gtk_root_get_focus(GTK_ROOT(view->_host)) == view->_appKitContent);
   key(display,XKeysymToKeycode(display,XK_c),True,CurrentTime);
   key(display,XKeysymToKeycode(display,XK_c),False,CurrentTime); XFlush(display); pump(.2);
   assert([[[window fieldEditor:NO forObject:field] string] containsString:@"c"]);
@@ -423,7 +424,8 @@ int main(void)
   [window makeKeyAndOrderFront:nil]; pump(0.3);
   XQueryTree(display, view->_child, &root, &parent, &children, &count);
   if (children) XFree(children);
-  assert(parent == view->_parent && gtk_widget_get_mapped(view->_host));
+  assert(parent == DefaultRootWindow(display) && gtk_widget_get_mapped(view->_host));
+  assert(XGetWindowAttributes(display,view->_child,&backendAttributes) && backendAttributes.map_state != IsViewable);
   GtkWidget *close = closeControl(view->_header);
   assert(close);
   graphene_rect_t closeBounds;

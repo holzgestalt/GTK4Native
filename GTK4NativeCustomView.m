@@ -18,6 +18,7 @@
   double startX, startY;
   BOOL dispatching;
   NSMutableArray *pendingEvents;
+  BOOL windowContent;
 }
 - (void)snapshot:(GtkSnapshot *)snapshot;
 - (void)deliver:(NSArray *)request;
@@ -42,6 +43,7 @@ static void customMeasure(GtkWidget *widget, GtkOrientation orientation, int for
 static void customAllocate(GtkWidget *widget,int width,int height,int baseline)
 {
   GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
+  if(drawing->windowContent) return;
   NSValue *expected=g_object_get_data(G_OBJECT(widget),"appkit-reflected-frame");
   if(!expected) expected=g_object_get_data(G_OBJECT(widget),"appkit-source-frame");
   if(expected && !NSEqualRects(drawing->source.frame,expected.rectValue)) return;
@@ -109,7 +111,8 @@ static void pressed(GtkGestureClick *gesture,int count,double x,double y,gpointe
     gtk_gesture_set_state(GTK_GESTURE(gesture),GTK_EVENT_SEQUENCE_DENIED); return;
   }
   drawing->button=gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture)); drawing->clicks=count;
-  if ([drawing->source acceptsFirstResponder]) {
+  if(drawing->windowContent) gtk_widget_grab_focus(drawing->widget);
+  else if ([drawing->source acceptsFirstResponder]) {
     [drawing->source.window makeFirstResponder:drawing->source];
     gtk_widget_grab_focus(drawing->widget);
   }
@@ -146,15 +149,41 @@ static void focusEnter(GtkEventControllerFocus *controller,gpointer data)
 {
   GTK4CustomDrawing *drawing=data;
   if (drawing->input) gtk_im_context_focus_in(drawing->input);
-  if (drawing->source.window.firstResponder!=drawing->source) [drawing->source.window makeFirstResponder:drawing->source];
+  if (!drawing->windowContent && drawing->source.window.firstResponder!=drawing->source) [drawing->source.window makeFirstResponder:drawing->source];
 }
 static void focusLeave(GtkEventControllerFocus *controller,gpointer data)
 { GTK4CustomDrawing *drawing=data; if (drawing->input) gtk_im_context_focus_out(drawing->input); }
 static void commit(GtkIMContext *input,const char *text,gpointer data)
 {
   GTK4CustomDrawing *drawing=[(id)data retain];
-  @try { [(id)drawing->source insertText:[NSString stringWithUTF8String:text]]; }
+  @try {
+    id target=drawing->windowContent ? drawing->source.window.firstResponder : drawing->source;
+    if([target respondsToSelector:@selector(insertText:)]) [target insertText:[NSString stringWithUTF8String:text]];
+  }
   @finally { [drawing release]; }
+}
+
+static gboolean windowScrolled(GtkEventControllerScroll *controller,double dx,double dy,gpointer data)
+{
+  GTK4CustomDrawing *drawing=data;
+  if(!drawing->source) return FALSE;
+  GdkEvent *event=gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+  double x,y,tx,ty;
+  if(!event || !gdk_event_get_position(event,&x,&y)) return FALSE;
+  GtkNative *native=gtk_widget_get_native(drawing->widget);
+  gtk_native_get_surface_transform(native,&tx,&ty);
+  graphene_point_t position=GRAPHENE_POINT_INIT(x-tx,y-ty),local;
+  if(!gtk_widget_compute_point(GTK_WIDGET(native),drawing->widget,&position,&local)) return FALSE;
+  NSRect bounds=drawing->source.bounds;
+  NSPoint point=NSMakePoint(NSMinX(bounds)+local.x/MAX(1,gtk_widget_get_width(drawing->widget))*NSWidth(bounds),
+    NSMinY(bounds)+(drawing->source.isFlipped?local.y/MAX(1,gtk_widget_get_height(drawing->widget)):1-local.y/MAX(1,gtk_widget_get_height(drawing->widget)))*NSHeight(bounds));
+  GdkModifierType state=gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
+  if(gtk_event_controller_scroll_get_unit(controller)==GDK_SCROLL_UNIT_SURFACE) { dx/=10; dy/=10; }
+  NSEvent *wheel=[NSEvent mouseEventWithType:NSScrollWheel location:[drawing->source convertPoint:point toView:nil]
+    modifierFlags:modifiers(state) timestamp:g_get_monotonic_time()/1e6 windowNumber:drawing->source.window.windowNumber
+    context:nil eventNumber:0 clickCount:0 pressure:0 buttonNumber:0 deltaX:dx deltaY:-dy deltaZ:0];
+  [NSApp postEvent:wheel atStart:NO];
+  return TRUE;
 }
 
 BOOL GTK4NativeCanWrapView(NSView *view)
@@ -215,9 +244,54 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
   return widget;
 }
 
+GtkWidget *GTK4NativeWindowContentNew(NSView *view,CGFloat scale)
+{
+  GtkWidget *widget=GTK4NativeCustomViewNew(view,scale);
+  GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
+  drawing->windowContent=YES;
+  /* The host already owns this widget. Avoid retaining the host through its
+   * drawing source; detach before destroying the GTK tree. */
+  [drawing->source release];
+  drawing->input=gtk_im_multicontext_new(); gtk_im_context_set_client_widget(drawing->input,widget);
+  g_signal_connect(drawing->input,"commit",G_CALLBACK(commit),drawing);
+  GtkEventController *scroll=gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+  g_signal_connect(scroll,"scroll",G_CALLBACK(windowScrolled),drawing);
+  gtk_widget_add_controller(widget,scroll);
+  gtk_widget_set_focusable(widget,TRUE);
+  return widget;
+}
+void GTK4NativeWindowContentDetach(GtkWidget *widget)
+{
+  if(GTK4NativeIsCustomView(widget)) ((GSAppKitWidget *)widget)->drawing->source=nil;
+}
+
+static void drawWindowSubtree(NSView *view,NSRect rect)
+{
+  if([view isHidden]) return;
+  if(GSNativeViewPeerForView(view)) return;
+  if([view isKindOfClass:[NSTableView class]] && [view valueForKey:@"_nativeTableView"]) return;
+  NSGraphicsContext *context=[NSGraphicsContext currentContext];
+  [context lockFocusView:view inRect:rect];
+  @try {
+    GSDrawNativeView(view,rect);
+    for(NSView *child in [[view.subviews copy] autorelease]) {
+      NSRect local=NSIntersectionRect([child convertRect:rect fromView:view],child.visibleRect);
+      if(NSIsEmptyRect(local)) continue;
+      NSPoint origin=[child convertPoint:NSZeroPoint toView:view];
+      NSPoint x=[child convertPoint:NSMakePoint(1,0) toView:view],y=[child convertPoint:NSMakePoint(0,1) toView:view];
+      NSAffineTransform *transform=[NSAffineTransform transform];
+      [transform setTransformStruct:(NSAffineTransformStruct){x.x-origin.x,x.y-origin.y,y.x-origin.x,y.y-origin.y,origin.x,origin.y}];
+      [NSGraphicsContext saveGraphicsState];
+      @try { [transform concat]; NSRectClip(local); drawWindowSubtree(child,local); }
+      @finally { [NSGraphicsContext restoreGraphicsState]; }
+    }
+  } @finally { [context unlockFocusView:view needsFlush:NO]; }
+}
+
 @implementation GTK4CustomDrawing
 - (void)snapshot:(GtkSnapshot *)snapshot
 {
+  if(!source) return;
   int width=gtk_widget_get_width(widget),height=gtk_widget_get_height(widget);
   int backing=MAX(1,gtk_widget_get_scale_factor(widget));
   if (width<=0 || height<=0 || NSIsEmptyRect(source.bounds)) return;
@@ -240,7 +314,7 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
       [transform scaleXBy:width*backing/NSWidth(source.bounds) yBy:(source.isFlipped?-1:1)*height*backing/NSHeight(source.bounds)];
       [transform translateXBy:-NSMinX(source.bounds) yBy:-NSMinY(source.bounds)]; [transform concat];
       NSRectClip(rect); NSRectFillUsingOperation(rect,NSCompositeClear);
-      GSDrawNativeView(source,rect);
+      if(windowContent) drawWindowSubtree(source,rect); else GSDrawNativeView(source,rect);
     } @finally {
       [context unlockFocusView:source needsFlush:NO];
       [NSGraphicsContext restoreGraphicsState]; [context flushGraphics]; [NSGraphicsContext setCurrentContext:previous];
@@ -271,7 +345,10 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
     else event=[NSEvent mouseEventWithType:type location:location modifierFlags:modifiers(state)
       timestamp:g_get_monotonic_time()/1e6 windowNumber:source.window.windowNumber context:nil eventNumber:0
       clickCount:clicks pressure:button?1:0 buttonNumber:eventButton deltaX:0 deltaY:0 deltaZ:0];
-    if (dispatching) { [NSApp postEvent:event atStart:NO]; return; }
+    /* Window input belongs to AppKit's event queue. Dispatching mouseDown
+     * from a run-loop performer keeps that performer active throughout split
+     * tracking, preventing the autodisplay performers from running until up. */
+    if (windowContent || dispatching) { [NSApp postEvent:event atStart:NO]; return; }
     SEL method=type==NSMouseMoved?@selector(mouseMoved:):type==NSMouseEntered?@selector(mouseEntered:):type==NSMouseExited?@selector(mouseExited:)
       :type==NSLeftMouseDown?@selector(mouseDown:):type==NSLeftMouseUp?@selector(mouseUp:):type==NSLeftMouseDragged?@selector(mouseDragged:)
       :type==NSRightMouseDown?@selector(rightMouseDown:):type==NSRightMouseUp?@selector(rightMouseUp:):type==NSRightMouseDragged?@selector(rightMouseDragged:)
@@ -299,6 +376,7 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
   NSEvent *event=[NSEvent keyEventWithType:up?NSKeyUp:NSKeyDown location:NSZeroPoint modifierFlags:modifiers(state)
     timestamp:g_get_monotonic_time()/1e6 windowNumber:source.window.windowNumber context:nil
     characters:text charactersIgnoringModifiers:text isARepeat:NO keyCode:code];
+  if(windowContent) { [NSApp postEvent:event atStart:NO]; return; }
   NSArray *request=@[event,NSStringFromSelector(up?@selector(keyUp:):@selector(keyDown:))];
   [pendingEvents addObject:request];
   [[NSRunLoop mainRunLoop] performSelector:@selector(deliver:) target:self
@@ -309,9 +387,9 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
 {
   if ([pendingEvents indexOfObjectIdenticalTo:request]==NSNotFound) return;
   [pendingEvents removeObjectIdenticalTo:request];
-  if (!GSNativeViewPeerForView(source)) return;
+  if (!source || (!windowContent && !GSNativeViewPeerForView(source))) return;
   NSEvent *event=request[0];
-  if (dispatching) { [NSApp postEvent:event atStart:NO]; return; }
+  if (windowContent || dispatching) { [NSApp postEvent:event atStart:NO]; return; }
   [self retain]; dispatching=YES;
   id<GSNativeEventSource> previous=GSSetNativeEventSource(self);
   @try { [source performSelector:NSSelectorFromString(request[1]) withObject:event]; }
@@ -333,6 +411,7 @@ GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
 {
   if(input) { gtk_im_context_set_client_widget(input,NULL); g_object_unref(input); }
   if(texture) g_object_unref(texture);
-  [pendingEvents release]; [context release]; [bitmap release]; [source release]; [super dealloc];
+  [pendingEvents release]; [context release]; [bitmap release];
+  if(!windowContent) [source release]; [super dealloc];
 }
 @end

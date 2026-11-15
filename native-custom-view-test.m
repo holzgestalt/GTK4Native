@@ -130,7 +130,7 @@ int main(void)
   CGFloat factor=window.userSpaceScaleFactor/gtk_widget_get_scale_factor(native);
   CHECK(root && GTK4NativeIsCustomView(native) && GTK_IS_BUTTON(nativeButton) && GTK_IS_SCROLLED_WINDOW(nativeScroll),
     @"complete window hosts custom drawing, native controls and nested scrolling in GTK");
-  CHECK(host->_nativeTableRects.count==1,@"complete native window has one stable content region");
+  CHECK(host->_nativeRegions.count==1,@"complete native window has one stable content region");
   CHECK([GSNativeViewPeerForView(canvas) ownsLayoutForNativeView:canvas],@"native peer owns custom layout");
   CHECK(GTK_IS_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager(native)),@"custom children use GTK layout");
   display=gdk_x11_display_get_xdisplay(gtk_widget_get_display(native));

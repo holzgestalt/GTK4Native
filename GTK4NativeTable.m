@@ -302,14 +302,21 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   NSRect nextRect = NSMakeRect((NSMinX(rect)-NSMinX(bounds))*_scale-body.origin.x,
     ([_host isFlipped] ? NSMinY(rect)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(rect))*_scale-body.origin.y,
     NSWidth(rect)*_scale, NSHeight(rect)*_scale);
+  nextRect=NSMakeRect(lround(nextRect.origin.x),lround(nextRect.origin.y),
+    MAX(1,lround(nextRect.size.width)),MAX(1,lround(nextRect.size.height)));
+  NSColor *background=[[_table backgroundColor] colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+  if(background) {
+    GdkRGBA color={background.redComponent,background.greenComponent,background.blueComponent,background.alphaComponent};
+    GTK4NativeClipSetBackground(_clip,&color);
+  }
   if (!NSEqualRects(_hostRect,nextRect) || !NSEqualRects(_fullHostRect,nextFullRect)) {
     _hostRect = nextRect; _fullHostRect = nextFullRect;
-    gtk_fixed_move(GTK_FIXED(_host->_nativeContent), _clip, NSMinX(_hostRect), NSMinY(_hostRect));
-    gtk_widget_set_size_request(_clip, MAX(1,lround(NSWidth(_hostRect))), MAX(1,lround(NSHeight(_hostRect))));
     GtkAllocation allocation = {lround(NSMinX(_fullHostRect)-NSMinX(_hostRect)),
       lround(NSMinY(_fullHostRect)-NSMinY(_hostRect)),
       MAX(1,lround(NSWidth(_fullHostRect))), MAX(1,lround(NSHeight(_fullHostRect)))};
     GTK4NativeClipSetAllocation(_clip,allocation);
+    GtkAllocation placement={NSMinX(_hostRect),NSMinY(_hostRect),NSWidth(_hostRect),NSHeight(_hostRect)};
+    GTK4NativeClipPlace(_clip,_host->_nativeContent,placement);
   }
   for (GTK4NativeRow *row in [_rows allObjects]) {
     if (!row->_bound || !row->_box) continue;

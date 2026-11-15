@@ -48,7 +48,9 @@ for theme in Adwaita Adwaita:dark; do
     GTK_THEME="$theme" xvfb-run -a timeout -k 2s 15s "$test_build_dir/native-file-panel-test"
   GTK_THEME="$theme" xvfb-run -a "$test_build_dir/renderer-test"
   GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-scroller-test"
-  GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
+  # This checks AppKit's field-editor backing/focus rendering explicitly.
+  # Native entry widgets are covered by native-view and native-window tests.
+  GTK4_NATIVE_WINDOWS=0 GTK_THEME="$theme" xvfb-run -a "$test_build_dir/integration-test"
   GTK_THEME="$theme" xvfb-run -a timeout 15s "$test_build_dir/native-menu-test"
 done
 GDK_BACKEND=wayland WAYLAND_DISPLAY=gnustep-test-unavailable \
@@ -106,3 +108,6 @@ bash "$plugin_root/scripts/test-scroll-layout.sh"
 
 # Complete scenes and custom AppKit responder/drawing wrappers.
 bash "$plugin_root/scripts/test-custom-views.sh"
+
+# GTK-owned window composition and live AppKit split tracking.
+bash "$plugin_root/scripts/test-live-resize.sh"

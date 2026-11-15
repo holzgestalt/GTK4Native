@@ -8,5 +8,9 @@ GtkWidget *GTK4NativeClipNew(GtkWidget *child);
 /* A row viewport fills its allocation without measuring/changing its child. */
 GtkWidget *GTK4NativeClipNewFilling(GtkWidget *child);
 void GTK4NativeClipSetChild(GtkWidget *clip, GtkWidget *child);
+/* Backdrop for transparent controls exposed through an AppKit surface hole. */
+void GTK4NativeClipSetBackground(GtkWidget *clip, const GdkRGBA *color);
 void GTK4NativeClipSetAllocation(GtkWidget *clip, GtkAllocation allocation);
+/* Commit explicit AppKit geometry before publishing its native surface hole. */
+void GTK4NativeClipPlace(GtkWidget *clip, GtkWidget *fixed, GtkAllocation allocation);
 #endif

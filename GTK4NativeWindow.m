@@ -4,6 +4,8 @@
 #import "GTK4NativeMenu.h"
 #import "GTK4NativeTable.h"
 #import "GTK4NativeControls.h"
+#import "GTK4NativeClip.h"
+#import "GTK4NativeCustomView.h"
 #import <GNUstepGUI/GSToolbarView.h>
 
 // Keep the AppKit view attached for toolbar ownership and validation.
@@ -22,7 +24,6 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
-#include <X11/extensions/shape.h>
 #include <math.h>
 
 // The desktop sees the GTK host, while AppKit assigns application metadata to
@@ -74,8 +75,7 @@ BOOL GTK4NativeWindowsAvailable(void)
   if (g_getenv("GTK4_NATIVE_WINDOWS") && !strcmp(g_getenv("GTK4_NATIVE_WINDOWS"), "0")) return NO;
   if (![GSCurrentServer() isKindOfClass:NSClassFromString(@"XGServer")]
       || !GDK_IS_X11_DISPLAY(gdk_display_get_default())) return NO;
-  int event, error;
-  return XShapeQueryExtension((Display *)[GSCurrentServer() serverDevice], &event, &error);
+  return YES;
 }
 static int nativeDisplayScale(void)
 {
@@ -129,6 +129,7 @@ static BOOL nativeToolbarHasFocus(GTK4NativeWindowDecorationView *view)
   GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
   return focus && ((view->_nativeToolbar && gtk_widget_is_ancestor(focus, view->_nativeToolbar))
     || (view->_nativeToolbarSearch && gtk_widget_is_ancestor(focus, view->_nativeToolbarSearch))
+    || focus==view->_appKitContent
     || (view->_nativeContent && gtk_widget_is_ancestor(focus, view->_nativeContent)));
 }
 static void toolbarItemReleased(gpointer item) { [(id)item release]; }
@@ -278,12 +279,7 @@ static void hostActive(GObject *host, GParamSpec *spec, gpointer data)
     NSWindow *window = [view window];
     if ([NSApp modalWindow] && [NSApp modalWindow] != window && ![window worksWhenModal]) return;
     [window makeKeyWindow];
-    Display *display = (Display *)[GSServerForWindow(window) serverDevice];
-    XWindowAttributes attr;
-    if (XGetWindowAttributes(display, view->_child, &attr) && attr.map_state == IsViewable) {
-      XSetInputFocus(display, view->_child, RevertToParent, CurrentTime);
-      XFlush(display);
-    }
+
   }
 }
 
@@ -316,35 +312,6 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   GtkWidget *button = gtk_window_get_default_widget(GTK_WINDOW(view->_host));
   return button && gtk_widget_is_sensitive(button) && gtk_widget_get_mapped(button)
     ? gtk_widget_activate(button) : FALSE;
-}
-
-static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent *event, gpointer data)
-{
-  GTK4NativeWindowDecorationView *view = data;
-  GdkEventType type = gdk_event_get_event_type(event);
-  // Popovers have their own native surface and coordinates. Their events must
-  // stay in GTK rather than being tested against the AppKit child cutouts.
-  if (gdk_event_get_surface(event) != gtk_native_get_surface(GTK_NATIVE(view->_host))) return FALSE;
-  if (type == GDK_KEY_PRESS || type == GDK_KEY_RELEASE) return !nativeToolbarHasFocus(view);
-  double x, y, dx, dy;
-  if (!gdk_event_get_position(event, &x, &y)) return FALSE;
-  gtk_native_get_surface_transform(GTK_NATIVE(view->_host), &dx, &dy);
-  x -= dx; y -= dy;
-  // The embedded AppKit client handles this area. Do not let GtkWindow's
-  // gestures claim the same pointer sequence on the ancestor surface.
-  graphene_rect_t bounds;
-  if (!gtk_widget_compute_bounds(gtk_window_get_child(GTK_WINDOW(view->_host)), view->_host, &bounds)) return FALSE;
-  if ([view->_nativeControls containsPoint:NSMakePoint(x, y - bounds.origin.y)]) return FALSE;
-  for (GTK4NativeTable *peer in [view->_nativeTables allObjects]) {
-    NSRect native = [peer hostRect];
-    if (!NSIsEmptyRect(native) && NSPointInRect(NSMakePoint(x, y - bounds.origin.y), native)) return FALSE;
-  }
-  BOOL embedded = x >= 0 && x < gtk_widget_get_width(view->_host)
-    && y >= bounds.origin.y && y < gtk_widget_get_height(view->_host);
-  if (embedded && type == GDK_BUTTON_PRESS && view->_child) {
-    [view focusAppKitContent];
-  }
-  return embedded;
 }
 
 @implementation GTK4NativeWindowDecorationView
@@ -401,24 +368,24 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
       g_strfreev(sides);
       g_free(layout);
     }
-    // The empty GTK content establishes layout; the AppKit X11 child covers it.
+    // GTK composes the entire content. Unadapted AppKit drawing is a custom
+    // GTK node below native controls, never an overlapping X11 child window.
     _nativeContent = gtk_fixed_new();
     _nativeTables = [[NSHashTable weakObjectsHashTable] retain];
     _nativeControls = [[GTK4NativeControls alloc] initWithHost:self];
     GtkWidget *contentOverlay = gtk_overlay_new();
-    GtkWidget *background = gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
-    gtk_widget_add_css_class(background,"view");
-    gtk_overlay_set_child(GTK_OVERLAY(contentOverlay), background);
+    _nativeBackground = GTK4NativeClipNewFilling(NULL);
+    gtk_overlay_set_child(GTK_OVERLAY(contentOverlay), _nativeBackground);
+    CGFloat factor=owner.userSpaceScaleFactor/MAX(1,gtk_widget_get_scale_factor(_host));
+    _appKitContent=GTK4NativeWindowContentNew(self,factor);
+    _appKitClip=GTK4NativeClipNew(_appKitContent);
+    gtk_fixed_put(GTK_FIXED(_nativeContent),_appKitClip,0,0);
     gtk_overlay_add_overlay(GTK_OVERLAY(contentOverlay), _nativeContent);
     // Native peers follow AppKit's pane allocation without imposing the last
     // allocation as a new minimum size on the entire GTK window.
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(contentOverlay), _nativeContent, FALSE);
     gtk_window_set_child(GTK_WINDOW(_host), contentOverlay);
     gtk_widget_add_css_class(_host, "gnustep-native-window");
-    GtkEventController *contentEvents = gtk_event_controller_legacy_new();
-    gtk_event_controller_set_propagation_phase(contentEvents, GTK_PHASE_CAPTURE);
-    g_signal_connect(contentEvents, "event", G_CALLBACK(hostContentEvent), self);
-    gtk_widget_add_controller(_host, contentEvents);
     GtkEventController *defaultKeys = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(defaultKeys, GTK_PHASE_CAPTURE);
     g_signal_connect(defaultKeys, "key-pressed", G_CALLBACK(controlDefaultKey), self);
@@ -699,8 +666,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     _hostTimer = nil;
     Display *display = (Display *)[GSServerForWindow(window) serverDevice];
     XUnmapWindow(display, _child);
-    XReparentWindow(display, _child, DefaultRootWindow(display), 0, 0);
-    XSync(display, False); // Detach before GTK destroys its parent surface.
+    XSync(display, False);
     _child = 0;
     _parent = 0;
     _lastGeometry = NSZeroRect;
@@ -717,7 +683,7 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     Display *display = (Display *)[server serverDevice];
     setApplicationIcon(display, _parent);
     copyApplicationProperty(display, _child, _parent, "WM_CLASS");
-    XReparentWindow(display, _child, _parent, 0, 0);
+    XUnmapWindow(display,_child);
     XSync(display, False);
     _hostTimer = [NSTimer timerWithTimeInterval:0.01 target:self
       selector:@selector(synchronizeNativeWindow:) userInfo:nil repeats:YES];
@@ -798,15 +764,10 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
 }
 - (void)focusAppKitContent
 {
-  if (!_child || !gtk_widget_get_mapped(_host) || !nativeToolbarHasFocus(self)) return;
+  if (!_appKitContent || !gtk_widget_get_mapped(_host)) return;
   if (![window isKeyWindow] && !gtk_window_is_active(GTK_WINDOW(_host))) return;
   if ([NSApp modalWindow] && [NSApp modalWindow] != window && ![window worksWhenModal]) return;
-  Display *display = (Display *)[GSServerForWindow(window) serverDevice];
-  XWindowAttributes attributes;
-  if (!XGetWindowAttributes(display,_child,&attributes) || attributes.map_state != IsViewable) return;
-  gtk_root_set_focus(GTK_ROOT(_host),NULL);
-  XSetInputFocus(display,_child,RevertToParent,CurrentTime);
-  XFlush(display);
+  gtk_widget_grab_focus(_appKitContent);
 }
 - (BOOL)miniaturizeNativeWindow
 {
@@ -814,13 +775,36 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
   gtk_window_minimize(GTK_WINDOW(_host));
   return YES;
 }
+- (void)display
+{
+  [super display];
+  GTK4NativeCustomViewInvalidate(_appKitContent,self.bounds);
+  [self synchronizeNativeWindow:nil];
+}
+- (BOOL)focusNativeWindow
+{
+  if(!gtk_root_get_focus(GTK_ROOT(_host))) gtk_widget_grab_focus(_appKitContent);
+  GdkSurface *surface=gtk_native_get_surface(GTK_NATIVE(_host));
+  if(surface && gtk_widget_get_mapped(_host)) gdk_toplevel_focus(GDK_TOPLEVEL(surface),GDK_CURRENT_TIME);
+  return YES;
+}
+- (void)displayIfNeeded
+{
+  [super displayIfNeeded];
+  GTK4NativeCustomViewInvalidate(_appKitContent,self.bounds);
+  /* Split-view tracking already runs AppKit's autodisplay performer. Commit
+   * native geometry at that boundary instead of waiting for the host timer. */
+  [self synchronizeNativeWindow:nil];
+}
 - (void)synchronizeNativeWindow:(id)sender
 {
   if (_placing || !_child || !_wantedVisible) return;
   [self retain];
   _placing = YES;
   @try {
-    for (int i = 0; i < 64 && g_main_context_pending(NULL); i++)
+    // AppKit display can be requested by a GTK allocation/draw callback.
+    // Reentering GLib there can destroy/rebind widgets in the active GTK frame.
+    for (int i = 0; g_main_depth()==0 && i < 64 && g_main_context_pending(NULL); i++)
       g_main_context_iteration(NULL, FALSE);
     if (!_child) return;
     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(_host));
@@ -839,6 +823,11 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     if (gtk_window_get_modal(GTK_WINDOW(_host)) != modal)
       gtk_window_set_modal(GTK_WINDOW(_host), modal);
     [self updateNativeToolbar];
+    NSColor *background=[[window backgroundColor] colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+    if(background) {
+      GdkRGBA color={background.redComponent,background.greenComponent,background.blueComponent,background.alphaComponent};
+      GTK4NativeClipSetBackground(_nativeBackground,&color);
+    }
     NSMutableArray *nativeRects = [NSMutableArray arrayWithArray:[_nativeControls update]];
     for (GTK4NativeTable *peer in [_nativeTables allObjects]) {
       if ([peer update] && !NSIsEmptyRect([peer hostRect]))
@@ -898,55 +887,20 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
     int x, y;
     XTranslateCoordinates(display, _parent, root, lround(dx * scale), lround(dy * scale), &x, &y, &unused);
     NSRect geometry = NSMakeRect(x, y, width, height);
-    graphene_rect_t contentBounds;
-    if (!gtk_widget_compute_bounds(gtk_window_get_child(GTK_WINDOW(_host)), _host, &contentBounds)) return;
-    int top = lround(contentBounds.origin.y * scale);
-    double radius = GTK4NativeWindowCornerRadius(_host) * scale;
-    if (gtk_window_is_maximized(GTK_WINDOW(_host)) || gtk_window_is_fullscreen(GTK_WINDOW(_host))) radius = 0;
     BOOL geometryChanged = !NSEqualRects(geometry, _lastGeometry);
     BOOL sizeChanged = !NSEqualSizes(geometry.size, _lastGeometry.size);
-    NSPoint offset = NSMakePoint(lround(dx*scale),lround(dy*scale));
-    BOOL offsetChanged = !NSEqualPoints(offset,_childOffset);
-    BOOL shapeChanged = sizeChanged || radius != _shapeRadius || top != _shapeTitleHeight
-      || ![_nativeTableRects isEqual:nativeRects];
-    if (sizeChanged || offsetChanged) {
-      XMoveResizeWindow(display, _child, offset.x, offset.y, width, height);
-      _childOffset = offset;
+    if (sizeChanged) XMoveResizeWindow(display,_child,x,y,width,height);
+    ASSIGNCOPY(_nativeRegions,nativeRects);
+    graphene_rect_t body;
+    if(gtk_widget_compute_bounds(_nativeContent,_host,&body)) {
+      CGFloat factor=window.userSpaceScaleFactor/MAX(1,gtk_widget_get_scale_factor(_host));
+      GtkAllocation allocation={-lround(body.origin.x),-lround(body.origin.y),
+        MAX(1,lround(NSWidth(self.bounds)*factor)),MAX(1,lround(NSHeight(self.bounds)*factor))};
+      GTK4NativeClipSetAllocation(_appKitClip,allocation);
+      GtkAllocation placement={0,0,MAX(1,gtk_widget_get_width(_nativeContent)),MAX(1,gtk_widget_get_height(_nativeContent))};
+      GTK4NativeClipPlace(_appKitClip,_nativeContent,placement);
     }
-    if (shapeChanged) {
-      ASSIGNCOPY(_nativeTableRects, nativeRects);
-      // Keep the child in the same coordinates as AppKit's complete window.
-      // Its shape exposes GTK's real titlebar and the rounded GTK frame beneath.
-      Region shape = XCreateRegion();
-      for (int row = MAX(0, top); row < height - 1; row++) {
-        int inset = 1;
-        double bottom = height - 1 - row;
-        if (radius > 0 && bottom < radius) {
-          double d = radius - bottom;
-          inset = MAX(1, (int)ceil(radius - sqrt(MAX(0, radius * radius - d * d))) + 1);
-        }
-        if (width > inset * 2) {
-          XRectangle strip = {inset,row,width-2*inset,1};
-          XUnionRectWithRegion(&strip,shape,shape);
-        }
-      }
-      Region holes = XCreateRegion();
-      for (NSValue *value in nativeRects) {
-        NSRect rect = [value rectValue];
-        XRectangle hole = {floor(NSMinX(rect) * scale), top + floor(NSMinY(rect) * scale),
-          ceil(NSWidth(rect) * scale), ceil(NSHeight(rect) * scale)};
-        XUnionRectWithRegion(&hole,holes,holes);
-      }
-      XSubtractRegion(shape,holes,shape);
-      // Publish the finished region once. A temporary full-client shape would
-      // cover the GTK peer and expose it again on every window movement.
-      XShapeCombineRegion(display,_child,ShapeBounding,0,0,shape,ShapeSet);
-      XShapeCombineRegion(display,_child,ShapeInput,0,0,shape,ShapeSet);
-      XDestroyRegion(holes); XDestroyRegion(shape);
-      _shapeRadius = radius;
-      _shapeTitleHeight = top;
-    }
-    if (geometryChanged || offsetChanged) {
+    if (geometryChanged) {
       // Parent moves do not configure the child: synthesize the ICCCM root-space
       // configure so the normal backend updates frame, backing store and layout.
       XEvent event = {0};
@@ -962,11 +916,6 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
       XFlush(display);
       _lastGeometry = geometry;
     }
-    XWindowAttributes childAttributes;
-    if (XGetWindowAttributes(display, _child, &childAttributes) && childAttributes.map_state != IsViewable) {
-      XMapWindow(display, _child);
-      XFlush(display);
-    }
     if (gtk_window_is_active(GTK_WINDOW(_host))) {
       Window focus;
       int revert;
@@ -980,8 +929,9 @@ static gboolean hostContentEvent(GtkEventControllerLegacy *controller, GdkEvent 
 }
 - (void)dealloc
 {
+  GTK4NativeWindowContentDetach(_appKitContent);
   for (GTK4NativeTable *peer in [_nativeTables allObjects]) [peer invalidate];
-  [_nativeTables release]; [_nativeTableRects release];
+  [_nativeTables release]; [_nativeRegions release];
   [_nativeControls release];
   [_hostTimer invalidate];
   [_toolbarSignature release];

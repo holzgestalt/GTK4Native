@@ -48,6 +48,11 @@ int main(void)
     NSLog(@"Live scale %@ frame=%@ child=%@",factor,NSStringFromRect([window frame]),NSStringFromRect([child frame]));
   }
   [window setContentSize:NSMakeSize(420,180)]; [content layoutSubtreeIfNeeded];
+  // Native GTK allocation completes on its frame clock; inspect the reflected
+  // AppKit model after that allocation rather than invoking a second solver.
+  NSDate *resizeDeadline=[NSDate dateWithTimeIntervalSinceNow:1];
+  while(fabs(NSWidth(child.frame)-396)>=1 && resizeDeadline.timeIntervalSinceNow>0)
+    [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:.02]];
   assert(fabs(NSWidth([child frame])-396)<1);
   NSLog(@"Live scaling and constraint resize checks passed");
   [window orderOut:nil]; [window release]; [pool drain]; return 0;

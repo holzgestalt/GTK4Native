@@ -108,7 +108,7 @@ bash native/GTK4Native/scripts/test-buttons.sh
 
 `GTK4NativeControls` automatically discovers supported controls in ordinary
 window content, including controls inside AppKit scroll views and tab pages.
-Its clipped native regions participate in the existing X11 host cutouts. Peers
+Its clipped native widgets belong to the GTK window content tree. Peers
 follow visibility, scrolling, scale and geometry changes and are removed when
 source views detach. Native table rows continue to use their own view bridges.
 Supported custom application views use the GTK wrapper described below. Controls
@@ -445,8 +445,8 @@ one GtkScrolledWindow and one native GTK document tree. This includes the
 ControlGallery Buttons & Selection page. Passive NSView subclasses that only
 change coordinate flipping are supported; drawing/input overrides, unsupported
 controls, visible rulers and custom NSScrollView subclasses retain the mixed
-AppKit path. The entire native viewport replaces the AppKit drawing/input region,
-including the gaps between controls. Its X11 cutout stays fixed during scrolling.
+AppKit path. The entire viewport is a GTK widget, including the gaps between controls.
+Unadapted content draws in a custom GTK widget; no visible backend surface is used.
 
 GTK handles scrolling, clipping, overlay scrollbars, wheel/kinetic input and
 allocation of this tree in the same frame. Translated document constraints run
@@ -460,7 +460,7 @@ GTK; neither requires repositioning individual controls. Geometry/structure chan
 rebuild the document tree, with immediate invalidation on page replacement/detach.
 
 `native-scroll-document-test.m` freezes host synchronization while sending real
-wheel events, verifies GTK child movement and stable viewport holes, and checks
+wheel events, verifies GTK child movement and stable viewport allocations, and checks
 that AppKit backing pixels cannot show through. It also checks programmatic scroll,
 model/action, resize, replacement and detach across light/dark and display scales.
 The compound-view suite separately exercises GTK constraint anchors and resizing.
@@ -481,7 +481,7 @@ the existing menu implementation. GNUstep's automatically attached arrow image
 is not mistaken for a custom item image.
 
 Native table/outline peers now use the same GTK clip container as standalone
-controls. The clip and X11 drawing/input cutout follow the enclosing scroll
+controls. The GTK clip and input allocation follow the enclosing scroll
 view's `visibleRect`, including clipping by outer scroll views. The contained
 GtkScrolledWindow retains its full viewport allocation and gets a negative
 offset when partially clipped, avoiding changes to its scroll page/selection
@@ -590,32 +590,38 @@ corners.
 
 ## Native GTK window hosts
 
-GTK4Native's window decorator now creates a real GtkWindow with a GtkHeaderBar
-and embeds the existing GNUstep X11 drawing/input window inside it. GTK owns the
-outer window, titlebar controls, decoration layout, shadow, and rounded frame.
-AppKit still owns content, text editing, menus, document lifecycle and close
-approval. Normal titled windows use this automatically on the XGServer backend
-with an X11 GDK display and the Shape extension. Borderless windows, icons,
-unsupported displays/backends and other providers retain backend ownership.
-`GTK4_NATIVE_WINDOWS=0` or explicit `GTK_CSD=0` selects the legacy path. No new
-library dependency is introduced. This does not make AppKit a Wayland client.
+GTK4Native creates a real GtkWindow with a GtkHeaderBar and owns the complete
+visible content tree. Native controls, lists and scroll documents are GTK
+widgets in clipped containers. Remaining AppKit drawing, including text editors
+and split dividers, is rendered into a custom GTK content widget. Its input and
+IME controllers route events through the normal AppKit responder chain. There
+is no mapped backend child window and no X11 shape cutout per widget.
 
-GSWindowDecorationView has default implementations of backendWindowStyleMask,
-orderNativeWindow:relativeTo:, placeNativeWindow: and miniaturizeNativeWindow.
-Existing decorators return the original style and decline native handling.
-NSWindow consults these hooks at backend creation, ordering, placement and
-minimization; no GTK/X11 code is added to the shared GUI API or libs-back.
+The backend window remains unmapped for AppKit window-number, graphics-context
+and configure-event compatibility. GTK owns composition, clipping, keyboard
+focus, titlebar controls, shadows and the rounded frame. AppKit retains models,
+actions, bindings, text editing and document lifecycle. Normal titled windows
+use this on XGServer with an X11 GDK display. Borderless windows and unsupported
+backends retain their existing path. `GTK4_NATIVE_WINDOWS=0` or `GTK_CSD=0`
+selects that path explicitly; this does not make AppKit a Wayland client.
 
-The GTK provider keeps native and AppKit frame coordinates synchronized through
-the normal backend configure-event path, including GTK decoration/shadow offsets
-and differing GTK/AppKit scale factors. The child surface is shaped to expose
-GTK's titlebar and corner treatment; it maps only after GTK allocates its first
-frame. Native close requests call NSWindow.performClose:, preserving document
-save cancellation. GTK input over the embedded area is excluded from GTK window
-gestures, while the backend receives AppKit pointer and key events. Transient
-parents, modal status, level hints, opacity, size constraints and native
-minimize/restore state are synchronized. File choosers and alerts can use the
-real GTK host as their transient parent.
+GSWindowDecorationView supplies optional ordering, placement, minimization and
+focus hooks. The GTK provider synchronizes model geometry through backend
+configure events, including decoration offsets and differing display scales.
+Native close requests still call NSWindow.performClose:, preserving document
+save cancellation. Transient parents, modal status, level hints, window opacity,
+size constraints and minimize/restore state remain synchronized.
+
+Split tracking synchronizes native allocations at AppKit's display boundary.
+Window mouse/key input enters AppKit's normal event queue. A mouse-down handler
+must not run inside a run-loop performer: its nested tracking loop would prevent
+AppKit's autodisplay performers from running until the mouse is released.
+The clipping containers apply explicit frame changes before the next GTK frame;
+window, table and scroll backgrounds remain opaque while content repaints.
+`bash scripts/test-live-resize.sh` checks table/outline, scroll and plain content
+geometry, rendered alpha, repeated editor repaints while the divider is held,
+real divider dragging, editor keyboard input and the
+unmapped backend surface in light/dark, 2× and fractional display scales.
 
 The current bridge targets normal titled windows on X11/XWayland. Full native
 Wayland hosting, live decoration/font metric changes, dynamic transitions
@@ -623,18 +629,18 @@ between titled and borderless styles and complete fullscreen content-layout
 integration remain separate work. The host uses one GDK display scale, matching
 the existing provider's scaling model.
 
-`native-window-test.m` exercises a real embedded surface, pointer/keyboard text
+`native-window-test.m` exercises the GTK-owned surface, pointer/keyboard text
 editing, frame geometry, resize, title updates, hide/show, one-shot backend
 recreation, the actual GTK close button and AppKit close refusal. On a desktop
 with a window manager, set `NATIVE_WINDOW_WM_TEST=1` to additionally exercise
 maximize/restore and minimize/restore. Set `NATIVE_WINDOW_PREVIEW` to capture the
-X11 native host, including its AppKit child. The desktop tests have passed on
+GTK native host, including AppKit drawing in its custom content widget. The desktop tests have passed on
 GNOME/XWayland at 200%; EditGlyphData's startup and File→New regression also pass.
 
 ## Native header toolbars
 
 The GTK top-level receives the AppKit application's icon through `_NET_WM_ICON`
-and inherits the embedded window's `WM_CLASS` so desktop launchers and task
+and inherits the backend window's `WM_CLASS` so desktop launchers and task
 switchers identify the application correctly. The icon is reapplied after GTK
 maps the host, when GTK would otherwise install its own default icon.
 
@@ -709,14 +715,11 @@ artwork. The bridge owns the widget and retains its Objective-C source view.
 This also allows a compound cell to include platform drawing alongside translated
 text fields, images, and buttons.
 
-Native peers live in the GTK window's content overlay. The existing X11 AppKit
-child has completed bounding/input cutouts exposing those widgets. The GTK body
-has an opaque themed background. Pure window moves update root coordinates
-without resizing or reshaping the child; resizing and pane changes publish each
-finished shape once. This avoids temporarily covering native peers and then
-exposing them again during dragging. GTK and AppKit scales must agree before
-importing geometry or rebuilding toolbars. Native peer positions use window
-coordinates, including any AppKit menu above the content view.
+Native peers and the AppKit fallback widget share the GTK content container.
+GTK handles their stacking and hit testing; the backend window stays unmapped.
+Explicit peer allocations and AppKit display updates keep them together during
+pane dragging. GTK and AppKit scales must agree before importing geometry or
+rebuilding toolbars. Native positions include any AppKit menu above the content.
 
 Set `GTK4_NATIVE_TABLES=0` before launching to select the existing AppKit table
 path. Unsupported window hosts also use that path. The independent compound-view
@@ -724,7 +727,7 @@ regression checks real GTK widget types, translated layout and resize, NSImage
 content, native text editing and bindings, Objective-C action senders, and a
 platform drawing widget. The EditGlyphData native-table regression opens the
 full GlyphData.xml, switches both row templates, resizes, injects real X11 clicks
-and keyboard navigation, verifies input cutouts and teardown, and moves the
+and keyboard navigation, verifies native input and teardown, and moves the
 window over a contrasting background to check for exposed windows underneath.
 
 ### Initialization before the display connection
@@ -744,15 +747,10 @@ explicit scale override. The standalone C renderer's initialization is unchanged
 
 ### Keyboard focus between native controls and AppKit content
 
-GTK owns focus for the sidebar and native toolbar controls; the embedded backend
-child owns focus while editing AppKit content. Pointer events sent to that X11
-child bypass the GTK host's event controllers. NSWindow therefore notifies its
-decorator when it receives content mouse-down events and when a content view
-becomes first responder, including an unchanged first responder. The default
-`focusAppKitContent` hook is a no-op. GTK4Native clears its GTK focus widget and
-moves X11 focus to the mapped AppKit child, respecting modal and inactive windows.
-Native sidebar navigation and toolbar search continue to own GTK focus until an
-AppKit content interaction requests the handoff.
+GTK owns focus for both native controls and the custom content widget used by
+AppKit editors. The generic `focusNativeWindow` decorator hook prevents the
+backend from focusing its unmapped window. `focusAppKitContent` selects the GTK
+content widget while preserving AppKit's first responder and modal rules.
 
 The native-window regression tests real toolbar-to-editor clicks and typing.
 EditGlyphData's full-file regression also types in a detail field after native
@@ -762,7 +760,7 @@ and verifies programmatic refocusing of an already active AppKit field editor.
 ### Closing individual native windows
 
 Desktop window managers list GTK hosts in `_NET_CLIENT_LIST_STACKING`, while
-AppKit owns their embedded backend children. The backend's ordered-window list
+AppKit owns their unmapped backend windows. The backend's ordered-window list
 can therefore omit all of the application's windows. NSApplication now decides
 whether the last main window closed from its own window registry, counting
 visible, miniaturized and application-hidden windows. It rechecks when the

@@ -1,9 +1,18 @@
 #import "GTK4NativeMenu.h"
+#import "GTK4NativeWindow.h"
 #import <GNUstepGUI/GSDisplayServer.h>
 #include <gtk/gtk.h>
 #include <math.h>
 #include <gdk/x11/gdkx.h>
 #include <X11/extensions/shape.h>
+
+static Window menuOwnerWindow(NSWindow *owner)
+{
+  GtkWindow *host=GTK4NativeHostForWindow(owner);
+  GdkSurface *surface=host ? gtk_native_get_surface(GTK_NATIVE(host)) : NULL;
+  return surface ? gdk_x11_surface_get_xid(surface)
+    : (Window)[GSServerForWindow(owner) windowDevice:owner.windowNumber];
+}
 
 @interface GTK4MenuSession : NSObject
 {
@@ -217,11 +226,13 @@ static BOOL GTK4RunNativeMenu(NSMenu *menu, NSRect rect, NSWindow *owner, BOOL *
   gtk_window_set_default_size(GTK_WINDOW(session->anchor), anchorWidth, 1);
   Display *xdisplay = gdk_x11_display_get_xdisplay(display);
   Window xid = gdk_x11_surface_get_xid(surface);
-  Window ownerXid = (Window)[GSServerForWindow(owner) windowDevice:[owner windowNumber]];
+  Window ownerXid = menuOwnerWindow(owner);
   XSetTransientForHint(xdisplay, xid, ownerXid);
   // A menu click can arrive before the WM's focus-in notification. Focus the
   // owning application client, never the disposable GTK anchor.
-  XSetInputFocus(xdisplay, ownerXid, RevertToParent, CurrentTime);
+  XWindowAttributes ownerAttributes;
+  if(XGetWindowAttributes(xdisplay,ownerXid,&ownerAttributes) && ownerAttributes.map_state==IsViewable)
+    XSetInputFocus(xdisplay, ownerXid, RevertToParent, CurrentTime);
   XSync(xdisplay, False);
   // This is an input/positioning anchor, not an application toplevel. Do not
   // let a WM relocate it or let compositor opacity propagate to the popup.
@@ -229,15 +240,10 @@ static BOOL GTK4RunNativeMenu(NSMenu *menu, NSRect rect, NSWindow *owner, BOOL *
   settings.override_redirect = True;
   XChangeWindowAttributes(xdisplay, xid, CWOverrideRedirect, &settings);
   XShapeCombineRectangles(xdisplay, xid, ShapeBounding, 0, 0, NULL, 0, ShapeSet, Unsorted);
-  XWindowAttributes ownerAttributes;
-  Window child;
-  int ownerX, ownerY;
-  XGetWindowAttributes(xdisplay, ownerXid, &ownerAttributes);
-  XTranslateCoordinates(xdisplay, ownerXid, DefaultRootWindow(xdisplay), 0, 0,
-                        &ownerX, &ownerY, &child);
-  NSPoint local = [owner convertScreenToBase:rect.origin];
-  int x = ownerX + (int)local.x;
-  int y = ownerY + ownerAttributes.height - (int)local.y;
+  XWindowAttributes screen;
+  XGetWindowAttributes(xdisplay,DefaultRootWindow(xdisplay),&screen);
+  int x=lround(rect.origin.x);
+  int y=lround(screen.height-rect.origin.y);
   // Map without asking the window manager to activate this helper. The
   // application's window keeps X input focus throughout menu tracking.
   gtk_widget_set_visible(session->anchor, TRUE);
@@ -335,12 +341,15 @@ BOOL GTK4TrackNativeMenu(NSMenuView *view, NSEvent *event)
       // interaction. GTK has consumed that press, so do not depend on replay
       // through the other X connection to open the next submenu.
       Display *display = gdk_x11_display_get_xdisplay(gdk_display_get_default());
-      Window ownerXid = (Window)[GSServerForWindow(owner) windowDevice:[owner windowNumber]];
+      Window ownerXid = menuOwnerWindow(owner);
       Window root, child; int rx, ry, wx, wy; unsigned int mask;
       if (!ownerXid || !XQueryPointer(display,ownerXid,&root,&child,&rx,&ry,&wx,&wy,&mask)) return YES;
       XWindowAttributes attributes;
       if (!XGetWindowAttributes(display,ownerXid,&attributes)) return YES;
-      point = [view convertPoint:NSMakePoint(wx,attributes.height-wy) fromView:nil];
+      XWindowAttributes rootAttributes;
+      if(!XGetWindowAttributes(display,root,&rootAttributes)) return YES;
+      NSPoint base=[owner convertScreenToBase:NSMakePoint(rx,rootAttributes.height-ry)];
+      point = [view convertPoint:base fromView:nil];
       if (!NSPointInRect(point,[view bounds])) return YES;
       NSInteger next = [view indexOfItemAtPoint:point];
       if (next < 0 || next == index || next >= [menu numberOfItems]) return YES;

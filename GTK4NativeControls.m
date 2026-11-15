@@ -149,6 +149,28 @@ static NSArray *structure(NSView *view)
   }
   return @[];
 }
+static NSColor *controlBackdrop(NSView *view)
+{
+  for(NSView *ancestor=view;ancestor;ancestor=ancestor.superview) {
+    if([ancestor isKindOfClass:[NSMatrix class]] && [(NSMatrix *)ancestor drawsBackground])
+      return [(NSMatrix *)ancestor backgroundColor];
+    if([ancestor isKindOfClass:[NSScrollView class]] && [(NSScrollView *)ancestor drawsBackground])
+      return [(NSScrollView *)ancestor backgroundColor];
+    if([ancestor isKindOfClass:[NSBox class]] && [(NSBox *)ancestor boxType]==NSBoxCustom && ![(NSBox *)ancestor isTransparent])
+      return [(NSBox *)ancestor fillColor];
+    if([ancestor respondsToSelector:@selector(backgroundColor)] && [ancestor respondsToSelector:@selector(drawsBackground)]
+        && [(id)ancestor drawsBackground]) return [(id)ancestor backgroundColor];
+  }
+  return view.window.backgroundColor;
+}
+static void updateControlBackdrop(GtkWidget *clip,NSView *view)
+{
+  NSColor *color=[controlBackdrop(view) colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+  if(color) {
+    GdkRGBA rgba={color.redComponent,color.greenComponent,color.blueComponent,color.alphaComponent};
+    GTK4NativeClipSetBackground(clip,&rgba);
+  } else GTK4NativeClipSetBackground(clip,NULL);
+}
 static NSValue *key(NSView *view) { return [NSValue valueWithPointer:view]; }
 
 static void releaseScrollSource(gpointer source, GClosure *closure) { [(id)source release]; }
@@ -257,6 +279,7 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
           [_scrollPeers setObject:peer forKey:identity]; [peer release];
         }
         [peer synchronize];
+        updateControlBackdrop(peer->clip,view);
         NSRect visible = NSIntersectionRect(view.bounds, view.visibleRect);
         gtk_widget_set_visible(peer->clip,!NSIsEmptyRect(visible));
         if (!NSIsEmptyRect(visible)) {
@@ -266,12 +289,14 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
           NSRect hostRect = NSMakeRect((NSMinX(rect)-NSMinX(bounds))*factor-body.origin.x,
             (_host.isFlipped ? NSMinY(rect)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(rect))*factor-body.origin.y,
             NSWidth(rect)*factor, NSHeight(rect)*factor);
+          hostRect=NSMakeRect(lround(hostRect.origin.x),lround(hostRect.origin.y),
+            MAX(1,lround(hostRect.size.width)),MAX(1,lround(hostRect.size.height)));
           GtkAllocation allocation = {lround((NSMinX(full)-NSMinX(rect))*factor),
             lround((_host.isFlipped ? NSMinY(full)-NSMinY(rect) : NSMaxY(rect)-NSMaxY(full))*factor),
             MAX(1,lround(NSWidth(full)*factor)),MAX(1,lround(NSHeight(full)*factor))};
           GTK4NativeClipSetAllocation(peer->clip,allocation);
-          gtk_fixed_move(GTK_FIXED(_host->_nativeContent),peer->clip,hostRect.origin.x,hostRect.origin.y);
-          gtk_widget_set_size_request(peer->clip,MAX(1,lround(NSWidth(hostRect))),MAX(1,lround(NSHeight(hostRect))));
+          GtkAllocation placement={hostRect.origin.x,hostRect.origin.y,hostRect.size.width,hostRect.size.height};
+          GTK4NativeClipPlace(peer->clip,_host->_nativeContent,placement);
           [rects addObject:[NSValue valueWithRect:hostRect]];
         }
         NSMutableArray *controls = [NSMutableArray arrayWithObject:document];
@@ -310,6 +335,7 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
       [peer release];
     }
     [peer->bridge synchronize];
+    updateControlBackdrop(peer->clip,view);
     NSRect visible = NSIntersectionRect([view bounds], [view visibleRect]);
     BOOL show = !NSIsEmptyRect(visible);
     gtk_widget_set_visible(peer->clip, show);
@@ -320,12 +346,14 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
     NSRect hostRect = NSMakeRect((NSMinX(rect)-NSMinX(bounds))*factor-body.origin.x,
       ([_host isFlipped] ? NSMinY(rect)-NSMinY(bounds) : NSMaxY(bounds)-NSMaxY(rect))*factor-body.origin.y,
       NSWidth(rect)*factor, NSHeight(rect)*factor);
+    hostRect=NSMakeRect(lround(hostRect.origin.x),lround(hostRect.origin.y),
+      MAX(1,lround(hostRect.size.width)),MAX(1,lround(hostRect.size.height)));
     CGFloat left = (NSMinX(full)-NSMinX(rect))*factor;
     CGFloat top = ([_host isFlipped] ? NSMinY(full)-NSMinY(rect) : NSMaxY(rect)-NSMaxY(full))*factor;
     GtkAllocation allocation = {lround(left), lround(top), MAX(1,lround(NSWidth(full)*factor)), MAX(1,lround(NSHeight(full)*factor))};
     GTK4NativeClipSetAllocation(peer->clip, allocation);
-    gtk_fixed_move(GTK_FIXED(_host->_nativeContent), peer->clip, hostRect.origin.x, hostRect.origin.y);
-    gtk_widget_set_size_request(peer->clip, MAX(1,lround(hostRect.size.width)), MAX(1,lround(hostRect.size.height)));
+    GtkAllocation placement={hostRect.origin.x,hostRect.origin.y,hostRect.size.width,hostRect.size.height};
+    GTK4NativeClipPlace(peer->clip,_host->_nativeContent,placement);
     [rects addObject:[NSValue valueWithRect:hostRect]];
     NSMutableArray *controls=[NSMutableArray arrayWithObject:view];
     while(controls.count) {
