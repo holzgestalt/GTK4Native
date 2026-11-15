@@ -220,6 +220,11 @@ static GtkWidget *toolbarImage(NSImage *image, int scale, int iconSize)
     {@"NSLockLockedTemplate", "changes-prevent-symbolic"},
     {@"NSLockUnlockedTemplate", "changes-allow-symbolic"},
     {@"NSBluetoothTemplate", "bluetooth-symbolic"},
+    {@"NSTouchBarPlayTemplate", "media-playback-start-symbolic"},
+    {@"NSTouchBarRecordStopTemplate", "media-playback-stop-symbolic"},
+    {@"NSTouchBarDeleteTemplate", "user-trash-symbolic"},
+    {@"NSTouchBarSearchTemplate", "system-search-symbolic"},
+    {@"NSTouchBarSidebarTemplate", "sidebar-show-symbolic"},
   };
   if ([image isTemplate]) {
     GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
