@@ -197,6 +197,18 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   g_signal_connect(factory, "teardown", G_CALLBACK(teardownRow), peer);
   peer->_list = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(peer->_selection)), factory);
   gtk_widget_add_css_class(peer->_list, "navigation-sidebar");
+  if ([table respondsToSelector:@selector(gtk4NativeCompactRows)] &&
+      [(id<GTK4NativeAppearanceHints>)table gtk4NativeCompactRows]) {
+    GdkDisplay *display = gdk_display_get_default();
+    if (!g_object_get_data(G_OBJECT(display), "appkit-compact-list-style")) {
+      GtkCssProvider *provider = gtk_css_provider_new();
+      gtk_css_provider_load_from_data(provider,
+        "listview.gnustep-compact-list > row { min-height: 0; padding: 2px 4px; }", -1);
+      gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+      g_object_set_data_full(G_OBJECT(display), "appkit-compact-list-style", provider, g_object_unref);
+    }
+    gtk_widget_add_css_class(peer->_list, "gnustep-compact-list");
+  }
   g_signal_connect(peer->_selection, "selection-changed", G_CALLBACK(nativeSelection), peer);
   g_signal_connect(peer->_list, "activate", G_CALLBACK(nativeActivate), peer);
   peer->_scroller = gtk_scrolled_window_new();

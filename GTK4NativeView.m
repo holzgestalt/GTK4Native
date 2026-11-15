@@ -295,9 +295,14 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       pango_attr_list_unref(attrs);
     }
   } else if ([view isKindOfClass:[NSImageView class]]) {
-    widget = gtk_picture_new();
-    gtk_picture_set_can_shrink(GTK_PICTURE(widget), TRUE);
-    gtk_picture_set_content_fit(GTK_PICTURE(widget), GTK_CONTENT_FIT_CONTAIN);
+    if ([view respondsToSelector:@selector(gtk4NativeIconName)]) {
+      widget = gtk_image_new();
+      gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
+    } else {
+      widget = gtk_picture_new();
+      gtk_picture_set_can_shrink(GTK_PICTURE(widget), TRUE);
+      gtk_picture_set_content_fit(GTK_PICTURE(widget), GTK_CONTENT_FIT_CONTAIN);
+    }
   } else if ([view isKindOfClass:[NSPopUpButton class]]) {
     widget = gtk_drop_down_new(NULL, NULL);
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
@@ -559,6 +564,40 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
         if (GTK_IS_TOGGLE_BUTTON(widget)) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), [(NSButtonCell *)[button cell] state] != NSOffState);
       }
     } else if ([view isKindOfClass:[NSImageView class]]) {
+      if (GTK_IS_IMAGE(widget)) {
+        NSString *name = [(id<GTK4NativeAppearanceHints>)view gtk4NativeIconName];
+        if ([name length]) {
+          if (g_strcmp0(gtk_image_get_icon_name(GTK_IMAGE(widget)), [name UTF8String]))
+            gtk_image_set_from_icon_name(GTK_IMAGE(widget), [name UTF8String]);
+          g_object_set_data(G_OBJECT(widget), "appkit-image", NULL);
+        } else {
+          NSImage *image = [(NSImageView *)view image];
+          int size = MAX(1,lround(MIN(NSWidth([view bounds]),NSHeight([view bounds])) * _scale));
+          if (g_object_get_data(G_OBJECT(widget), "appkit-image") != image
+              || GPOINTER_TO_INT(g_object_get_data(G_OBJECT(widget), "appkit-image-size")) != size
+              || gtk_image_get_storage_type(GTK_IMAGE(widget)) != GTK_IMAGE_PAINTABLE) {
+            GdkTexture *texture = imageTexture(image);
+            /* GtkImage uses a paintable's intrinsic size; pixel-size only
+             * scales named icons. Fit custom artwork to the AppKit image box. */
+            if (texture) {
+              GdkPixbuf *pixels = gdk_pixbuf_get_from_texture(texture);
+              if (pixels) {
+                GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixels,size,size,GDK_INTERP_BILINEAR);
+                g_object_unref(texture);
+                texture = scaled ? gdk_texture_new_for_pixbuf(scaled) : NULL;
+                if (scaled) g_object_unref(scaled);
+                g_object_unref(pixels);
+              }
+            }
+            gtk_image_set_from_paintable(GTK_IMAGE(widget), texture ? GDK_PAINTABLE(texture) : NULL);
+            if (texture) g_object_unref(texture);
+            g_object_set_data(G_OBJECT(widget), "appkit-image", image);
+            g_object_set_data(G_OBJECT(widget), "appkit-image-size", GINT_TO_POINTER(size));
+          }
+        }
+        gtk_image_set_pixel_size(GTK_IMAGE(widget), MAX(1,lround(MIN(NSWidth([view bounds]),NSHeight([view bounds])) * _scale)));
+        continue;
+      }
       NSImage *image = [(NSImageView *)view image];
       if (g_object_get_data(G_OBJECT(widget), "appkit-image") != image) {
         GdkTexture *texture = imageTexture(image);

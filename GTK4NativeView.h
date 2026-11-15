@@ -8,6 +8,14 @@
 - (GtkWidget *)gtk4NativeWidget;
 @end
 
+/* Optional appearance hints; AppKit retains layout, state and bindings. */
+@protocol GTK4NativeAppearanceHints
+@optional
+/* A nil/empty name uses the NSImageView's image instead of a themed symbol. */
+- (NSString *)gtk4NativeIconName;
+- (BOOL)gtk4NativeCompactRows;
+@end
+
 @interface GTK4NativeView : NSObject <GSNativeViewPeer>
 {
   NSView *_view;
