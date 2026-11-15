@@ -30,7 +30,7 @@
 - (void)dealloc { [_bridge release]; [super dealloc]; }
 @end
 static void releaseRow(gpointer data) { [(id)data release]; }
-static void groupToggled(GtkToggleButton *button, gpointer data)
+static void groupToggled(GtkButton *button, gpointer data)
 {
   GTK4NativeRow *row = data;
   if (!row->_peer || row->_peer->_synchronizing) return;
@@ -43,11 +43,23 @@ static void setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer
   GTK4NativeRow *row = [GTK4NativeRow new];
   row->_peer = data; row->_item = item;
   row->_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-  row->_expander = gtk_toggle_button_new();
-  gtk_button_set_icon_name(GTK_BUTTON(row->_expander), "pan-end-symbolic");
+  /* A plain disclosure triangle: GTK's default button minimum (34px) and a
+   * toggle button's checked background do not belong in an outline row. */
+  GdkDisplay *display = gdk_display_get_default();
+  if (display && !g_object_get_data(G_OBJECT(display), "appkit-disclosure-style")) {
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider,
+      "button.gnustep-disclosure { min-width: 16px; min-height: 16px; padding: 0; margin: 0; }", -1);
+    gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_set_data_full(G_OBJECT(display), "appkit-disclosure-style", provider, g_object_unref);
+  }
+  row->_expander = gtk_button_new_from_icon_name("pan-end-symbolic");
   gtk_widget_add_css_class(row->_expander, "flat");
+  gtk_widget_add_css_class(row->_expander, "gnustep-disclosure");
+  gtk_widget_set_valign(row->_expander, GTK_ALIGN_CENTER);
+  gtk_widget_set_focusable(row->_expander, FALSE);
   gtk_widget_set_visible(row->_expander, FALSE);
-  g_signal_connect(row->_expander, "toggled", G_CALLBACK(groupToggled), row);
+  g_signal_connect(row->_expander, "clicked", G_CALLBACK(groupToggled), row);
   gtk_box_append(GTK_BOX(row->_box), row->_expander);
   gtk_list_item_set_child(item, row->_box);
   g_object_set_data_full(G_OBJECT(item), "appkit-row", row, releaseRow);
@@ -91,8 +103,10 @@ static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
     id object = [outline itemAtRow:index];
     BOOL expandable = [outline isExpandable:object];
     peer->_synchronizing = YES;
-    gtk_widget_set_visible(row->_expander, expandable);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(row->_expander), [outline isItemExpanded:object]);
+    /* Leaves keep the triangle's space so siblings share one text edge. */
+    gtk_widget_set_visible(row->_expander, TRUE);
+    gtk_widget_set_opacity(row->_expander, expandable ? 1 : 0);
+    gtk_widget_set_sensitive(row->_expander, expandable);
     gtk_button_set_icon_name(GTK_BUTTON(row->_expander), [outline isItemExpanded:object] ? "pan-down-symbolic" : "pan-end-symbolic");
     peer->_synchronizing = NO;
     gtk_widget_set_margin_start(row->_box, 4 + MAX(0, [outline levelForRow:index]) * [outline indentationPerLevel] * peer->_scale);
