@@ -9,6 +9,7 @@ typedef struct {
   GtkWidget *child;
   GtkAllocation allocation;
   gboolean fill;
+  gboolean measureMinimum;
   gboolean hasBackground;
   GdkRGBA background;
 } GTK4Clip;
@@ -17,6 +18,13 @@ G_DEFINE_TYPE(GTK4Clip, gtk4_native_clip, GTK_TYPE_WIDGET)
 static void clipMeasure(GtkWidget *widget, GtkOrientation orientation, int forSize,
   int *minimum, int *natural, int *minimumBaseline, int *naturalBaseline)
 {
+  GTK4Clip *clip=(GTK4Clip *)widget;
+  if(clip->measureMinimum && clip->child) {
+    gtk_widget_measure(clip->child,orientation,forSize,minimum,NULL,minimumBaseline,NULL);
+    *natural=*minimum;
+    if(naturalBaseline) *naturalBaseline=minimumBaseline?*minimumBaseline:-1;
+    return;
+  }
   *minimum = *natural = 0;
   if (minimumBaseline) *minimumBaseline = -1;
   if (naturalBaseline) *naturalBaseline = -1;
@@ -77,10 +85,33 @@ GtkWidget *GTK4NativeClipNew(GtkWidget *child)
   GTK4NativeClipSetChild(widget, child);
   return widget;
 }
+void GTK4NativeDetachWidget(GtkWidget *widget)
+{
+  GtkWidget *parent=gtk_widget_get_parent(widget);
+  if (!parent) return;
+  if (G_TYPE_CHECK_INSTANCE_TYPE(parent,gtk4_native_clip_get_type())) GTK4NativeClipSetChild(parent,NULL);
+  else if (GTK_IS_PANED(parent)) {
+    if (gtk_paned_get_start_child(GTK_PANED(parent))==widget) gtk_paned_set_start_child(GTK_PANED(parent),NULL);
+    else gtk_paned_set_end_child(GTK_PANED(parent),NULL);
+  } else if (GTK_IS_OVERLAY(parent)) {
+    if(gtk_overlay_get_child(GTK_OVERLAY(parent))==widget) gtk_overlay_set_child(GTK_OVERLAY(parent),NULL);
+    else gtk_overlay_remove_overlay(GTK_OVERLAY(parent),widget);
+  } else if (GTK_IS_SCROLLED_WINDOW(parent)) gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(parent),NULL);
+  else if (GTK_IS_VIEWPORT(parent)) gtk_viewport_set_child(GTK_VIEWPORT(parent),NULL);
+  else if (GTK_IS_BOX(parent)) gtk_box_remove(GTK_BOX(parent),widget);
+  else if (GTK_IS_FIXED(parent)) gtk_fixed_remove(GTK_FIXED(parent),widget);
+  else gtk_widget_unparent(widget);
+}
 GtkWidget *GTK4NativeClipNewFilling(GtkWidget *child)
 {
   GtkWidget *widget=GTK4NativeClipNew(child);
   ((GTK4Clip *)widget)->fill=TRUE;
+  return widget;
+}
+GtkWidget *GTK4NativeClipNewScene(GtkWidget *child)
+{
+  GtkWidget *widget=GTK4NativeClipNewFilling(child);
+  ((GTK4Clip *)widget)->measureMinimum=TRUE;
   return widget;
 }
 void GTK4NativeClipSetChild(GtkWidget *widget, GtkWidget *child)

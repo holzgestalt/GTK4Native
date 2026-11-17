@@ -24,6 +24,7 @@
   NSUInteger _generation;
   BOOL _pending;
   BOOL _bound;
+  gint64 _bindFrame;
 }
 @end
 @implementation GTK4NativeRow
@@ -118,6 +119,8 @@ static void bindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpoint
   GTK4NativeRow *row = g_object_get_data(G_OBJECT(item), "appkit-row");
   row->_pending = YES;
   row->_bound = YES;
+  GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
+  row->_bindFrame=clock?gdk_frame_clock_get_frame_counter(clock):-1;
   if (row->_bridge) gtk_widget_set_visible(row->_bridge.widget,FALSE);
   guint position = gtk_list_item_get_position(item);
   gtk_widget_set_size_request(row->_box,-1, position < [peer->_table numberOfRows]
@@ -277,6 +280,24 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
     [self invalidate]; return NO;
   }
   NSScrollView *scroll = [_table enclosingScrollView];
+  gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(_scroller),scroll.borderType!=NSNoBorder);
+  if (_embedded) {
+    graphene_rect_t allocated;
+    if (gtk_widget_compute_bounds(_scroller,_host->_nativeContent,&allocated))
+      _hostRect=NSMakeRect(allocated.origin.x,allocated.origin.y,allocated.size.width,allocated.size.height);
+    for (GTK4NativeRow *row in [_rows allObjects]) {
+      if (!row->_bound || !row->_box || !gtk_widget_get_mapped(row->_box)
+          || gtk_widget_get_width(row->_box)<=0 || gtk_widget_get_height(row->_box)<=0) continue;
+      GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
+      if(clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
+      graphene_rect_t rowRect;
+      if (!gtk_widget_compute_bounds(row->_box,_scroller,&rowRect)
+          || rowRect.origin.y+rowRect.size.height<=0 || rowRect.origin.y>=gtk_widget_get_height(_scroller)) continue;
+      if (row->_pending) populateRow(self,row);
+      if (row->_bridge) [row->_bridge synchronize];
+    }
+    return YES;
+  }
   BOOL visible = scroll && ![_table isHiddenOrHasHiddenAncestor] && [scroll window] == [_table window];
   graphene_rect_t body;
   visible = visible && gtk_widget_get_height(_host->_nativeContent) > 0
@@ -320,6 +341,8 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   }
   for (GTK4NativeRow *row in [_rows allObjects]) {
     if (!row->_bound || !row->_box) continue;
+    GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
+    if(clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
     graphene_rect_t allocated;
     if (gtk_widget_get_width(row->_box) <= 0 || gtk_widget_get_height(row->_box) <= 0
         || !gtk_widget_compute_bounds(row->_box,_clip,&allocated)
@@ -338,6 +361,25 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
     gtk_list_view_scroll_to(GTK_LIST_VIEW(_list), row, GTK_LIST_SCROLL_FOCUS, NULL);
 }
 - (GtkWidget *)widget { return _scroller; }
+- (GtkWidget *)embed
+{
+  _embedded=YES;
+  GTK4NativeClipSetChild(_clip,NULL);
+  GTK4NativeDetachWidget(_scroller);
+  if (gtk_widget_get_parent(_clip)) gtk_widget_unparent(_clip);
+  return _scroller;
+}
+- (void)unembed
+{
+  if (!_embedded) return;
+  _embedded=NO;
+  GTK4NativeDetachWidget(_scroller);
+  if (!_host || !_table) return;
+  GTK4NativeClipSetChild(_clip,_scroller);
+  gtk_widget_set_visible(_scroller,TRUE);
+  gtk_fixed_put(GTK_FIXED(_host->_nativeContent),_clip,0,0);
+  _hostRect=NSZeroRect; _fullHostRect=NSZeroRect;
+}
 - (NSRect)hostRect { return _hostRect; }
 - (void)invalidate
 {

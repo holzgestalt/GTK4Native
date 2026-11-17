@@ -17,6 +17,7 @@
   NSRect _hostRect;
   BOOL _synchronizing;
   BOOL _failed;
+  BOOL _embedded;
   CGFloat _scale;
   NSUInteger _generation;
 }
@@ -26,5 +27,7 @@
 - (void)scrollRowToVisible:(NSInteger)row;
 - (void)invalidate;
 - (GtkWidget *)widget;
+- (GtkWidget *)embed;
+- (void)unembed;
 - (NSRect)hostRect;
 @end

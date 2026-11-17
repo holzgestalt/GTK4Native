@@ -84,6 +84,10 @@ int main(void)
     [[button rightAnchor] constraintEqualToAnchor:root.rightAnchor constant:-8],
     [[button centerYAnchor] constraintEqualToAnchor:entry.centerYAnchor],
     [[button widthAnchor] constraintEqualToConstant:80], [[button heightAnchor] constraintEqualToConstant:34],nil]];
+  NSLayoutConstraint *softMinimum=[entry.widthAnchor constraintGreaterThanOrEqualToConstant:120];
+  NSLayoutConstraint *softTrailing=[label.rightAnchor constraintLessThanOrEqualToAnchor:root.rightAnchor constant:-8];
+  softMinimum.priority=500; softTrailing.priority=500;
+  [root addConstraints:@[softMinimum,softTrailing]];
   GTK4NativeView *bridge = [[GTK4NativeView alloc] initWithView:root scale:1];
   NSCAssert(bridge != nil, @"a compound AppKit hierarchy must translate");
   GtkWidget *native = bridge.widget;
@@ -105,6 +109,7 @@ int main(void)
   gtk_window_set_default_size(GTK_WINDOW(window),640,90); pump();
   e = bounds(nativeEntry,native);
   NSCAssert(e.size.width > width + 150, @"GTK constraints must resize the native entry");
+  [bridge synchronize]; // Passive readback runs outside GTK's layout callbacks.
   NSCAssert(fabs(entry.frame.size.width-e.size.width)<2, @"solved GTK geometry is reflected to source views");
   gtk_editable_set_text(GTK_EDITABLE(nativeEntry),"Edited natively");
   NSCAssert([test.text isEqual:@"Edited natively"] && [[entry stringValue] isEqual:test.text], @"native editing must update the original control and binding");
@@ -170,6 +175,79 @@ int main(void)
   }
   gtk_window_set_child(GTK_WINDOW(window),NULL);
   [rowBridge release];
+  // Reattaching an editor can resize its source container before compatibility
+  // readback reaches its children. Reuse initial springs, not that mixed state.
+  NSView *editor=[[[NSView alloc] initWithFrame:NSMakeRect(0,0,300,200)] autorelease];
+  NSView *bar=[[[NSView alloc] initWithFrame:NSMakeRect(0,174,300,26)] autorelease];
+  bar.autoresizingMask=NSViewWidthSizable|NSViewMinYMargin;
+  [editor addSubview:bar];
+  GTK4NativeView *editorBridge=[[GTK4NativeView alloc] initWithView:editor scale:1];
+  gtk_window_set_child(GTK_WINDOW(window),editorBridge.widget);
+  gtk_window_set_default_size(GTK_WINDOW(window),300,200); pump();
+  [editor setFrameSize:NSMakeSize(300,160)];
+  gtk_window_set_child(GTK_WINDOW(window),NULL); [editorBridge release];
+  editorBridge=[[GTK4NativeView alloc] initWithView:editor scale:1];
+  gtk_window_set_child(GTK_WINDOW(window),editorBridge.widget);
+  gtk_window_set_default_size(GTK_WINDOW(window),300,160); pump();
+  graphene_rect_t barBounds=bounds([editorBridge widgetForView:bar],editorBridge.widget);
+  NSCAssert(fabs(barBounds.origin.y)<1 && fabs(barBounds.size.height-26)<1,
+    @"reattached editor keeps its top bar pinned through GTK constraints alone");
+  gtk_window_set_child(GTK_WINDOW(window),NULL); [editorBridge release];
+  // Ordinary NSViews describe stacks without application-specific subclasses.
+  for(int vertical=0;vertical<2;vertical++) {
+    NSView *stackRoot=[[[NSView alloc] initWithFrame:NSMakeRect(0,0,300,200)] autorelease];
+    NSView *stackBar=[[[NSView alloc] initWithFrame:vertical?NSMakeRect(0,174,300,26):NSMakeRect(0,0,26,200)] autorelease];
+    NSView *stackBody=[[[NSView alloc] initWithFrame:vertical?NSMakeRect(0,0,300,174):NSMakeRect(26,0,274,200)] autorelease];
+    stackBar.autoresizingMask=vertical?NSViewWidthSizable|NSViewMinYMargin:NSViewHeightSizable;
+    stackBody.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    [stackRoot addSubview:stackBody]; [stackRoot addSubview:stackBar];
+    GTK4NativeView *stackBridge=[[GTK4NativeView alloc] initWithView:stackRoot scale:1];
+    NSCAssert(GTK_IS_BOX(stackBridge.widget),@"plain linear containers use GtkBox without marker classes");
+    NSCAssert(gtk_orientable_get_orientation(GTK_ORIENTABLE(stackBridge.widget))
+      ==(vertical?GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL),@"initial geometry determines stack orientation");
+    NSCAssert(gtk_widget_get_first_child(stackBridge.widget)==[stackBridge widgetForView:stackBar],
+      @"initial geometry determines stack order, independently of source insertion order");
+    gtk_window_set_child(GTK_WINDOW(window),stackBridge.widget);
+    gtk_window_set_default_size(GTK_WINDOW(window),300,200); pump();
+    int minimum=0,resizedMinimum=0;
+    gtk_widget_measure(stackBridge.widget,GTK_ORIENTATION_HORIZONTAL,-1,&minimum,NULL,NULL,NULL);
+    gtk_window_set_default_size(GTK_WINDOW(window),420,280); pump();
+    gtk_widget_measure(stackBridge.widget,GTK_ORIENTATION_HORIZONTAL,-1,&resizedMinimum,NULL,NULL,NULL);
+    NSCAssert(minimum==resizedMinimum,@"plain stack minimum does not grow after window resizing");
+    graphene_rect_t barRect=bounds([stackBridge widgetForView:stackBar],stackBridge.widget);
+    graphene_rect_t bodyRect=bounds([stackBridge widgetForView:stackBody],stackBridge.widget);
+    NSCAssert(vertical?(barRect.origin.y==0 && barRect.size.height==26 && bodyRect.origin.y==26)
+      :(barRect.origin.x==0 && barRect.size.width==26 && bodyRect.origin.x==26),
+      @"native stack keeps the fixed bar and lets the body fill the resized window");
+    gtk_window_set_child(GTK_WINDOW(window),NULL); [stackBridge release];
+  }
+  NSView *constrained=[[[NSView alloc] initWithFrame:NSMakeRect(0,0,300,200)] autorelease];
+  NSView *fixedBar=[[[NSView alloc] initWithFrame:NSMakeRect(0,174,300,26)] autorelease];
+  NSView *flexBody=[[[NSView alloc] initWithFrame:NSMakeRect(0,0,300,174)] autorelease];
+  fixedBar.translatesAutoresizingMaskIntoConstraints=NO;
+  flexBody.translatesAutoresizingMaskIntoConstraints=NO;
+  [constrained addSubview:fixedBar]; [constrained addSubview:flexBody];
+  [constrained addConstraints:@[
+    [fixedBar.topAnchor constraintEqualToAnchor:constrained.topAnchor],
+    [fixedBar.leadingAnchor constraintEqualToAnchor:constrained.leadingAnchor],
+    [fixedBar.trailingAnchor constraintEqualToAnchor:constrained.trailingAnchor],
+    [fixedBar.heightAnchor constraintEqualToConstant:26],
+    [flexBody.topAnchor constraintEqualToAnchor:fixedBar.bottomAnchor],
+    [flexBody.leadingAnchor constraintEqualToAnchor:constrained.leadingAnchor],
+    [flexBody.trailingAnchor constraintEqualToAnchor:constrained.trailingAnchor],
+    [flexBody.bottomAnchor constraintEqualToAnchor:constrained.bottomAnchor]
+  ]];
+  GTK4NativeView *constrainedBridge=[[GTK4NativeView alloc] initWithView:constrained scale:1];
+  NSCAssert(GTK_IS_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager(constrainedBridge.widget)),
+    @"linear frames without springs retain the explicit constraints");
+  gtk_window_set_child(GTK_WINDOW(window),constrainedBridge.widget);
+  gtk_window_set_default_size(GTK_WINDOW(window),420,280); pump();
+  graphene_rect_t constrainedBody=bounds([constrainedBridge widgetForView:flexBody],constrainedBridge.widget);
+  int constrainedMinimum=0;
+  gtk_widget_measure(constrainedBridge.widget,GTK_ORIENTATION_HORIZONTAL,-1,&constrainedMinimum,NULL,NULL,NULL);
+  NSCAssert(constrainedBody.size.width>=400 && constrainedBody.size.height>=240 && constrainedMinimum<300,
+    @"constrained containers reflow without freezing initial child dimensions as window minima");
+  gtk_window_set_child(GTK_WINDOW(window),NULL); [constrainedBridge release];
   [entry unbind:NSValueBinding];
   gtk_window_destroy(GTK_WINDOW(window)); g_object_unref(window);
   [bridge release]; [test release];

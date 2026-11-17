@@ -45,6 +45,14 @@ static void pump(double seconds)
   }
 }
 static void countedClick(GtkWidget *widget, gpointer data) { (*(NSInteger *)data)++; }
+static BOOL inViewport(GtkWidget *widget)
+{
+  if(!gtk_widget_get_mapped(widget)) return NO;
+  GtkWidget *scroll=gtk_widget_get_ancestor(widget,GTK_TYPE_SCROLLED_WINDOW);
+  if(!scroll) return YES;
+  graphene_rect_t bounds,viewport=GRAPHENE_RECT_INIT(0,0,gtk_widget_get_width(scroll),gtk_widget_get_height(scroll));
+  return gtk_widget_compute_bounds(widget,scroll,&bounds) && graphene_rect_intersection(&bounds,&viewport,NULL);
+}
 static Display *input;
 static int (*motion)(Display *,int,int,int,unsigned long);
 static int (*buttonEvent)(Display *,unsigned int,int,unsigned long);
@@ -58,6 +66,7 @@ static void click(GtkWidget *widget, GTK4NativeWindowDecorationView *host)
   int scale = gtk_widget_get_scale_factor(GTK_WIDGET(native)), x,y; Window child;
   Window surface = gdk_x11_surface_get_xid(gtk_native_get_surface(native));
   (void)host;
+
   XTranslateCoordinates(input,surface,DefaultRootWindow(input),
     lround((rect.origin.x+rect.size.width/2+dx)*scale),
     lround((rect.origin.y+rect.size.height/2+dy)*scale), &x,&y,&child);
@@ -108,7 +117,7 @@ int main(void)
   [[window contentView] addSubview:scroll];
   ButtonPage *page=[[[ButtonPage alloc] initWithFrame:NSMakeRect(0,0,1000,1200)] autorelease];
   [scroll setDocumentView:page];
-  // Keep this suite on the mixed-content path; complete scenes have their own test.
+  // Exercise native controls nested inside a custom drawing container.
   NSTextView *fallback=[[[NSTextView alloc] initWithFrame:NSZeroRect] autorelease];
   [page addSubview:fallback];
   NSButton *push=makeButton(page,actions,@"Push",NSMakeRect(20,20,140,34));
@@ -152,7 +161,7 @@ int main(void)
   GtkWidget *nativeMatrix=[peers widgetForView:matrix], *nativeSwitch=[peers widgetForView:sw];
   GtkWidget *nativeSegments=[peers widgetForView:segments];
   NSLog(@"Native types: push=%s check=%s matrix=%s switch=%s segments=%s", nativePush ? G_OBJECT_TYPE_NAME(nativePush) : "nil", nativeCheck ? G_OBJECT_TYPE_NAME(nativeCheck) : "nil", nativeMatrix ? G_OBJECT_TYPE_NAME(nativeMatrix) : "nil", nativeSwitch ? G_OBJECT_TYPE_NAME(nativeSwitch) : "nil", nativeSegments ? G_OBJECT_TYPE_NAME(nativeSegments) : "nil");
-  CHECK(GTK_IS_BUTTON(nativePush) && GTK_IS_CHECK_BUTTON(nativeCheck) && GTK_IS_FIXED(nativeMatrix)
+  CHECK(GTK_IS_BUTTON(nativePush) && GTK_IS_CHECK_BUTTON(nativeCheck) && GTK_IS_GRID(nativeMatrix)
     && GTK_IS_SWITCH(nativeSwitch) && GTK_IS_BOX(nativeSegments),@"all page control families have real GTK widgets");
   CHECK(gtk_check_button_get_inconsistent(GTK_CHECK_BUTTON(nativeCheck)),@"mixed state native indicator");
   CHECK(GTK_IS_BOX(gtk_button_get_child(GTK_BUTTON([peers widgetForView:image]))),@"native image and label child widgets");
@@ -190,8 +199,10 @@ int main(void)
   before=actions->count; click(second,host);
   CHECK(matrix.selectedColumn==1 && [(NSCell *)[matrix cellAtRow:0 column:0] state]==NSOffState
     && actions->count==before+1 && actions->sender==matrix,@"radio exclusivity and original matrix action");
-  gtk_widget_grab_focus(second); XSetInputFocus(input,host->_parent,RevertToParent,CurrentTime); XFlush(input);
-  key(XK_Right); CHECK(matrix.selectedColumn==2 && actions->sender==matrix,@"native radio arrow-key navigation");
+  gtk_widget_grab_focus(second); XSetInputFocus(input,host->_parent,RevertToParent,CurrentTime); XFlush(input); pump(.1);
+  CHECK([peers widgetForView:matrix]==nativeMatrix,@"matrix peer survives native clicks");
+  key(XK_Right);
+  CHECK(matrix.selectedColumn==2 && actions->sender==matrix,@"native radio arrow-key navigation");
   click(nativeSwitch,host); CHECK([sw integerValue]==NSOnState && actions->sender==sw,@"real native switch input");
   GtkWidget *first=gtk_widget_get_first_child(nativeSegments);
   click(first,host); CHECK(segments.selectedSegment==0 && actions->sender==segments,@"segment selection");
@@ -212,6 +223,9 @@ int main(void)
     g_signal_handler_disconnect(widget,signal);
     CHECK(actions->count==before+1 && actions->sender==b,@"every bezel takes real native input");
   }
+  // Changing segment tracking mode replaces the scene's widget structure.
+  nativePush=[peers widgetForView:push]; nativeCheck=[peers widgetForView:check];
+  nativeSwitch=[peers widgetForView:sw];
   gtk_widget_grab_focus(nativePush); XSetInputFocus(input,host->_parent,RevertToParent,CurrentTime); XFlush(input); pump(.05);
   before=actions->count; key(XK_space); CHECK(actions->count==before+1 && actions->sender==push,@"native keyboard Space activation");
   CHECK(gtk_window_get_default_widget(GTK_WINDOW(host->_host))==[peers widgetForView:def],@"Return default is a native widget");
@@ -228,9 +242,9 @@ int main(void)
   buttonEvent(input,5,True,CurrentTime); buttonEvent(input,5,False,CurrentTime); XFlush(input); pump(.15);
   CHECK(NSMinY(scroll.contentView.bounds)>0,@"wheel over native control scrolls enclosing AppKit view");
   [page scrollPoint:NSZeroPoint]; pump(.1);
-  CHECK(!gtk_widget_get_mapped([peers widgetForView:bottom]),@"offscreen widget is not mapped");
+  CHECK(!inViewport([peers widgetForView:bottom]),@"GTK clips the offscreen widget");
   [page scrollPoint:NSMakePoint(0,700)]; pump(.18);
-  CHECK(!gtk_widget_get_mapped(nativePush) && gtk_widget_get_mapped([peers widgetForView:bottom]),@"scrolling updates clipping and native visibility");
+  CHECK(!inViewport(nativePush) && inViewport([peers widgetForView:bottom]),@"scrolling updates clipping and native visibility");
   before=actions->count; click([peers widgetForView:bottom],host); CHECK(actions->count==before+1 && actions->sender==bottom,@"scrolled native input coordinates");
   [page scrollPoint:NSZeroPoint]; pump(.15);
   const char *preview=getenv("NATIVE_BUTTONS_PREVIEW");

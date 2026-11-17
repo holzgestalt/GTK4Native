@@ -1,3 +1,37 @@
+# Native GTK integration rule
+
+Keep GTK-specific code and compatibility mappings in this repository.
+Applications and shared AppKit expose toolkit-neutral APIs and layout data;
+they must not acquire GTK dependencies or implement provider-specific selectors.
+
+Use a real GTK window and widget tree wherever possible. GTK owns standard
+controls, containers, layout, input, scrolling, split dividers, backgrounds and
+borders. Use actual `GtkPaned` and `GtkScrolledWindow` widgets and let GTK draw
+them. AppKit drawing is reserved for content with no native GTK equivalent,
+hosted inside custom GTK widget containers.
+AppKit supplies initial hierarchy, constraints and model state. GTK performs
+subsequent measurement and allocation; GTK layout/snapshot callbacks must not
+call AppKit layout engines, resize methods or frame setters. Geometry readback
+for source APIs happens after GTK's frame and never lays out native widgets.
+Scrollbar visibility and autohiding are exclusively GTK's responsibility,
+including initial layout before native-peer attachment. AppKit must not run
+its autohide algorithm for this provider.
+Window resizing also belongs to GTK: bypass AppKit split-delegate allocation
+for native peers and map sidebar holding priorities to `GtkPaned` resize flags.
+Whole-window scenes fill their viewport; do not enlarge and center them using
+a previous allocation's minimum size, which can push the sidebar offscreen.
+Keep these scenes as GTK fill overlays so native configure events allocate
+them directly, independently of the fixed-coordinate AppKit fallback layer.
+Window scenes propagate their native minimum through the overlay to GtkWindow
+and its window-manager size hints. Split panes respect child minima. Native
+container constraints preserve initially contained controls inside their bounds;
+scroll views keep document extents separate from viewport minima. Only minimum
+size propagates from a window scene, so enlarging it never locks in that size.
+Do not draw window/control
+backgrounds or borders in AppKit. Do not snapshot GTK widgets into AppKit to
+simulate standard controls. This rule takes precedence over historical drawing
+and fallback descriptions below.
+
 > GTK4Native is now an application-linked static provider. AppKit contains no
 > GTK4Native or GNUstep appearance classes. Build with
 > `bash scripts/build-editglyphdata.sh`, or build the archive with
@@ -6,14 +40,15 @@
 > It inherits the external `native/GNUstep` provider for fallback drawing.
 > Bundle installation and AppKit-theme build instructions below are historical.
 
-# GTK4 control drawing for GNUstep
+# Native GTK4 widgets for GNUstep
 
-This is the first working part of a GTK4 platform integration. GNUstep
-applications continue to use NSButton and NSTextField. A GSTheme subclass asks
-GTK4 to render their frames/backgrounds using its selected GTK theme. Supported buttons and selection controls in native windows are live GTK
-widgets, as are supported table rows. Other controls use GTK snapshots or
-AppKit fallback. No replica CSS, theme images, or hand-picked widget colors are
-used.
+Applications retain their AppKit APIs while the provider builds a live GTK
+window and widget hierarchy. Standard controls, split panes and scroll
+containers use native GTK widgets for rendering and interaction. AppKit custom
+content is hosted inside GTK drawing widgets, with rasterization bounded to
+the visible viewport. The source views retain application models, actions,
+bindings and compatibility geometry. The theme supplies source API metrics and
+colors; it does not paint scroll frames, scrollbars or split dividers.
 
 ## Standalone repository build
 
@@ -82,16 +117,17 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Window decoration | GTK top-level hosts for titled X11/XWayland windows; native titlebar controls and themed rounded frames | Native Wayland content backend; advanced window-style transitions |
 | Checkboxes/radio matrices | Live GtkCheckButton indicators, off/on/mixed checkbox states, grouped NSMatrix radios, native input and original target/action senders | Non-radio matrices and custom cells |
 | Switches/segments | Live GtkSwitch and linked native segment buttons; select-one, select-any, momentary and disabled segments | Segment popup menus and additional segment-style mappings |
-| Sliders/progress/steppers | AppKit fallback | GTK renderers, measurements and interaction states |
+| Combo boxes | Live editable GtkComboBoxText, native chevron/popup, items/data source, original sender/action | Custom/formatter-based text fields retain AppKit editing |
 | Menus and choices | Live GtkDropDown for flat text NSPopUpButton selection menus, with selection bindings and item updates; real GTK dropdown/context/positioned menus on X11 | Pull-down/complex NSPopUpButton surfaces, native menubar hosting, Wayland attachment |
 | Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
 | Scrollers | Whole GtkScrollbar snapshots, GTK thickness and thumb geometry, disabled/pressed states, GTK trough-click preference | Native GTK input/accessibility hosting, hover, overlay fading |
 | Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables and dedicated framework view adapters |
-| Tabs | AppKit fallback | GTK parts, focus/navigation and content integration |
+| Tabs | Live GtkStack with GtkStackSwitcher/GtkStackSidebar, persistent page peers and AppKit delegate/focus handling | Unsupported specialized page content retains fallback |
+| Boxes | Live GtkFrame groups with titles/content margins and GtkSeparator | Custom colors/borders, borderless and bottom-title boxes retain fallback |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
 Hosted button/selection controls use GTK rendering, input, focus, and accessibility;
-the AppKit objects keep model state, bindings, target/action, and frame layout.
+the AppKit objects keep model state, bindings, target/action and initial layout inputs.
 Text editing and other fallback controls still use their existing AppKit
 implementations. This does not claim native coverage of all control families.
 
@@ -404,10 +440,18 @@ GTK owns allocation, hit testing, clipping, scrolling, focus and event controlle
 There are no per-control X windows or moving holes within a complete native scene.
 Custom views can still supply gtk4NativeWidget to provide their own GTK rendering.
 
-All translated containers and table rows use GtkConstraintLayout. AppKit frame
+Filling containers and unambiguous linear springs/struts arrangements of ordinary
+NSViews use GtkBox. Constraint-only forms and table rows retain GtkConstraintLayout.
+Initial frames determine stack order; no application marker classes or
+provider-specific selectors are needed. AppKit frame
 springs/struts become native equations, intrinsic preferences use GTK constraint
-guides, and text baselines are translated through GTK font measurements. Solved
-geometry is reflected to the source views for coordinate conversion and API calls.
+guides, and text baselines are translated through GTK font measurements. Native
+control minima take precedence over undersized XIB slots. Solved geometry is
+reflected to source views only after GTK finishes its frame, for coordinate
+conversion and API calls. GTK measure, allocation and snapshot callbacks never
+run AppKit layout or set source frames.
+Initial springs/struts are preserved across scene replacement and reparenting;
+partially reflected source geometry never becomes a new layout template.
 The previous shadow NSViews and GNUstep solver have been removed from this path.
 
 AppKit's generic GSNativeView peer API has no GTK or theme dependency. It routes
@@ -495,48 +539,41 @@ viewport verify vertical and horizontal clipping. The button suite additionally
 checks real dropdown mouse/keyboard selection, bindings, disabled choices and
 model updates.
 
-## GTK scrollbars
+## Native split and scroll containers
 
-`NSScroller` now snapshots an actual `GtkScrollbar` for each orientation, with a
-`GtkAdjustment` synchronized from its normalized value and knob proportion.
-GTK supplies the slider rendering, CSS spacing, minimum thumb length and
-natural thickness. When GTK's overlay-scrolling setting is enabled, the renderer
-uses GTK's `overlay-indicator` class: a narrow thumb and transparent track. The
-old thumb is erased using the owning scroll view's background rather than a
-separate control-colored gutter. GTK4Native also omits AppKit's inner divider. There are no hand-drawn GTK scrollbar parts or
-legacy arrow buttons. Geometry comes from the allocated GTK range, trough and
-slider widgets; unsupported GTK widget hierarchies or allocations use the
-existing AppKit path. Light/dark theme colors and AppKit's backing scale apply
-through the existing snapshot bridge.
+Scroll views are live `GtkScrolledWindow` widgets, including their frame,
+background, scrollbars, clipping, wheel input, overlay behavior and autohiding.
+AppKit's requested scrolling axes configure GTK's policies. AppKit never runs
+its autohide algorithm for this provider, including before peer attachment.
+The theme paints no scroll-view frame, scrollbar or split-divider pixels.
+Non-scrolling document axes follow the native viewport instead of imposing a
+fixed document minimum on the pane.
 
-The shared AppKit adds two optional GSTheme hooks: `drawNativeScroller:dirtyRect:`
-and `getScrollerRect:forPart:inScroller:`. Both decline by default, preserving
-other providers' drawing and geometry. The first also covers disabled scrollers.
-`NSScroller.isEnabled` now reads its own stored state, matching its existing
-setter instead of consulting NSControl's unrelated cell.
+Split views are live `GtkPaned` widgets containing their native child scenes;
+more than two panes use a chain of paned widgets. GTK handles separator input,
+layout and painting directly. AppKit's split/pane objects mirror geometry and
+retain delegate constraints and programmatic position APIs. Native tables and
+outlines are children of this GTK hierarchy, with stable models during dragging.
+Only visible native rows need Objective-C templates; GTK's prefetched rows keep
+lightweight placeholders.
 
-`defaultScrollerWidth` measures both GTK orientations. `NSScrollView` already
-uses that metric in its content/frame sizing, tiling and autohide calculations,
-so it requires no GTK-specific layout code. Scrollbar geometry is shared by
-rendering, hit testing, and normalized thumb dragging. GTK's
-`gtk-primary-button-warps-slider` setting supplies the default jump/page policy;
-an explicit `GSScrollerScrollsByPage` override remains supported.
+Nib forms, native documents and table rows use GTK constraint layouts compiled
+from their initial AppKit constraints and springs/struts. Radio matrices use
+native GTK grids. These containers paint no background or border and do not
+invoke the AppKit layout solver while resizing. Compatibility for legacy
+background-only application views lives in the provider. Unmatched custom content
+and rich text use GTK drawing widgets, rasterizing only their visible viewport.
+GTK owns the surrounding standard containers and appearance.
 
-These are GTK-rendered controls in AppKit views. AppKit retains event tracking,
-target/action dispatch, wheel scrolling, document clipping, and autohiding.
-The indicators remain always visible and reserve their narrow width in AppKit
-layout; GtkScrolledWindow's live hover expansion and fading are separate work. It does not
-embed GTK input surfaces or provide GTK gestures/accessibility/hover. GTK4 has no
-supported GtkSocket/GtkPlug-style foreign widget embedding API; doing that needs
-a native-scroll-surface extension to the existing window/input host.
-
-`renderer-test.c` checks both orientations, movement, page proportions, minimum
-thumb size, pressed/disabled states, 2x output, and an unmapped snapshot host.
-`native-scroller-test.m` checks scroll-view layout, thumb hit tests and dragging,
-flipped/unflipped documents, jump/page clicks, resize, autohide, and disabled
-rendering in light/dark and at 2x. Its preview is
-`/tmp/gnustep-gtk4-scrollers.png`. The unavailable-display test verifies fallback;
-shared NSScroller tests verify default hook behavior and enabled-state reporting.
+`bash native/GTK4Native/scripts/test-live-resize.sh` exercises native GTK hit
+testing, repeated real divider drags with host synchronization disabled, live
+editor repaints, stable row models/templates, pane replacement, typing and
+closing, in light/dark and at integer/fractional scales. It also verifies that
+AppKit autohiding never runs before peer attachment. EditGlyphData's native-table
+integration checks the actual application's `GtkPaned`, GTK list selection,
+entry typing, resize and hidden backend window. The snapshot renderer remains
+available for legacy fallback diagnostics; it does not draw native scroll or
+split containers.
 
 ## Native alerts and automatic button rendering
 
@@ -687,12 +724,11 @@ remain the source of the hierarchy, layout, bindings, and action senders. The
 bridge translates ordinary NSView/NSTableCellView containers, read-only and
 editable NSTextFields, NSImageViews, buttons, toggles, and checkboxes into real
 GTK widgets. It does not capture AppKit row images. A GTK layout manager uses
-an independent GNUstep Auto Layout engine for each container, with native GTK
-intrinsic sizes and font baseline measurements. It preserves supported anchors,
+GtkConstraintLayout for each container, with native GTK intrinsic sizes and
+font baseline measurements. It preserves supported anchors,
 dimensions, baselines, equalities/inequalities, constants, multipliers, and AppKit
 constraint, hugging and compression priorities. Native font metrics can still
-differ from macOS. Solvers are reused across row binding and width changes;
-rows do not share GTK's window-wide constraint graph. The enclosing list supplies
+differ from macOS. GTK constraints are retained across row binding and width changes. The enclosing list supplies
 row heights, so populating a placeholder does not change the scroll geometry.
 Constraints between a container and its immediate children are supported,
 including nested containers. Unsupported hierarchies keep the AppKit path.
@@ -772,3 +808,33 @@ EditGlyphData's native-close test installs this host-only stacking list under
 Xvfb. Without it, a bare X server's fallback list masks the failure. The test
 checks document isolation, close notifications, surviving mapped GTK hosts,
 edited-document Discard, and actual last-window termination.
+
+NSTabView uses GtkStack with GtkStackSwitcher (top/bottom) or GtkStackSidebar
+(left/right). No-tab styles hide navigation. All page peers remain alive across
+selection changes; native changes go through AppKit's should/will/did-select
+delegate path, including vetoes. Page additions/removals replace the native
+structure; label and selection changes synchronize in place.
+
+Standard NSBox groups use GtkFrame, including live titles, content margins,
+nested native controls and content-view replacement. Separators use
+GtkSeparator. Custom-color/border boxes, borderless or bottom-title boxes, and
+containers with unsupported specialized content retain their fallback adapter.
+Run `bash scripts/test-containers.sh` for native input, delegate, layout,
+scrolling and teardown checks at light/dark, 2× and fractional scales.
+
+AppKit combo peers remove only GTK's default vertical minimum/padding, so
+original 24-point UI/XIB frames retain their complete native borders, chevron
+and popup. Transparent peer containers use their containing AppKit window/pane
+background (including scroll backgrounds and explicit matrix fills), rather
+than exposing a white GTK content-view backdrop.
+
+Native combo editors and popup items use the NSComboBox font (family, style and
+absolute size), including live font changes. AppKit point sizes convert once
+to GTK logical units; Pango's additional point-to-DPI scaling is avoided.
+Native editable text fields use the same font mapping.
+
+GTK 4.18 compatibility: optional inequalities are translated to a nonnegative
+slack guide plus a soft equality. This avoids the double unref in that version's
+soft-inequality error-variable path while keeping measurement, solving and
+allocation in GTK. See [GTK 4.18's solver](https://github.com/GNOME/gtk/blob/4.18.6/gtk/gtkconstraintsolver.c#L898)
+and the corrected ownership in [upstream GTK](https://github.com/GNOME/gtk/blob/main/gtk/gtkconstraintsolver.c#L898).

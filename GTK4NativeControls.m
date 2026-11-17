@@ -11,6 +11,7 @@
   CGFloat scale;
   NSArray *signature;
   BOOL invalidated;
+  BOOL fillsWindow;
 }
 - (void)invalidate;
 @end
@@ -19,7 +20,7 @@
 {
   if (invalidated) return; invalidated=YES;
   [bridge invalidate];
-  if (clip) { GTK4NativeClipSetChild(clip,NULL); if (gtk_widget_get_parent(clip)) gtk_widget_unparent(clip); }
+  if (clip) { GTK4NativeClipSetChild(clip,NULL); GTK4NativeDetachWidget(clip); }
 }
 - (void)dealloc
 {
@@ -28,7 +29,7 @@
     // GTK may retain the clipping widget for an in-flight frame. Disconnect its
     // child now, before releasing the bridge can unparent the source widget.
     GTK4NativeClipSetChild(clip, NULL);
-    if (gtk_widget_get_parent(clip)) gtk_widget_unparent(clip);
+    GTK4NativeDetachWidget(clip);
     g_object_unref(clip);
   }
   [bridge release]; [signature release]; [super dealloc];
@@ -50,12 +51,17 @@
   NSPoint lastOrigin;
   BOOL synchronizing;
   BOOL initialized;
+  BOOL nativeScrollPending;
 }
 - (void)nativeScrolled;
 - (void)synchronize;
 - (void)invalidate;
 @end
-static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer) { [(GTK4ScrollPeer *)peer nativeScrolled]; }
+static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer)
+{
+  GTK4ScrollPeer *scroll=peer;
+  if(!scroll->synchronizing && scroll->initialized) scroll->nativeScrollPending=YES;
+}
 @implementation GTK4ScrollPeer
 - (void)nativeScrolled
 {
@@ -74,8 +80,14 @@ static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer) { [(GTK4Scr
 - (void)synchronize
 {
   [bridge synchronize];
+  if(nativeScrollPending && g_main_depth()==0) {
+    nativeScrollPending=NO;
+    if(NSEqualPoints(lastOrigin,source.contentView.bounds.origin)) [self nativeScrolled];
+  }
   NSView *document=source.documentView;
-  gtk_widget_set_size_request(bridge.widget,MAX(1,lround(NSWidth(document.frame)*scale)),MAX(1,lround(NSHeight(document.frame)*scale)));
+  gtk_widget_set_size_request(bridge.widget,
+    source.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*scale)):-1,
+    source.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*scale)):-1);
   NSClipView *content = source.contentView;
   if (!initialized || !NSEqualPoints(lastOrigin,content.bounds.origin)) {
     GtkAdjustment *h = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scroller));
@@ -115,30 +127,46 @@ static void documentStructureInternal(NSView *view,NSMutableArray *signature,BOO
   id peer=GSNativeViewPeerForView(view);
   NSRect frame=[peer respondsToSelector:@selector(configurationFrameForView:)]?[peer configurationFrameForView:view]:view.frame;
   [signature addObject:@[[NSValue valueWithPointer:view],[NSValue valueWithRect:root?NSZeroRect:frame],
-    @(view.isFlipped),@(view.translatesAutoresizingMaskIntoConstraints),@(view.autoresizingMask)]];
+    @(view.isFlipped),@(view.translatesAutoresizingMaskIntoConstraints),@(root?0:view.autoresizingMask)]];
   [signature addObject:structure(view)];
   for(NSLayoutConstraint *c in view.constraints)
     [signature addObject:@[[NSValue valueWithPointer:c],@(c.constant),@(c.priority)]];
-  if([view class]==[NSScrollView class]) {
+  if([view isKindOfClass:[NSScrollView class]]) {
     NSScrollView *scroll=(id)view;
-    [signature addObject:@[@(scroll.hasHorizontalScroller),@(scroll.hasVerticalScroller),@(scroll.borderType)]];
+    [signature addObject:@[@(scroll.hasHorizontalScroller),@(scroll.hasVerticalScroller),@(scroll.borderType),
+      @(scroll.rulersVisible),@(scroll.hasHorizontalRuler),@(scroll.hasVerticalRuler),
+      [NSValue valueWithPointer:scroll.horizontalRulerView],[NSValue valueWithPointer:scroll.verticalRulerView]]];
     if(scroll.documentView) documentStructureInternal(scroll.documentView,signature,YES);
-  } else for(NSView *child in view.subviews) documentStructureInternal(child,signature,NO);
+  } else {
+    BOOL managed=[view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]];
+    for(NSView *child in GTK4NativeChildrenForView(view)) documentStructureInternal(child,signature,managed);
+  }
 }
 static void documentStructure(NSView *view,NSMutableArray *signature) { documentStructureInternal(view,signature,YES); }
 
 static BOOL buttonControl(NSView *view)
 {
-  return [view isKindOfClass:[NSButton class]]
+  return [view isKindOfClass:[NSPathControl class]] || [view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSComboBox class]]
+    || [view isKindOfClass:[NSButton class]]
     || [view isKindOfClass:[NSSwitch class]] || [view isKindOfClass:[NSSegmentedControl class]]
     || [view isKindOfClass:[NSMatrix class]];
 }
 static NSArray *structure(NSView *view)
 {
+  if ([view isKindOfClass:[NSSplitView class]]) return @[@([(NSSplitView *)view isVertical])];
+  if([view isKindOfClass:[NSTabView class]]) {
+    NSMutableArray *items=[NSMutableArray arrayWithObject:@([(NSTabView *)view tabViewType])];
+    for(NSTabViewItem *item in [(NSTabView *)view tabViewItems])
+      [items addObject:@[item,[NSValue valueWithPointer:item.view]]];
+    return items;
+  }
+  if([view isKindOfClass:[NSBox class]]) return @[@([(NSBox *)view boxType]),@([(NSBox *)view borderType])];
   if ([view isKindOfClass:[NSMatrix class]]) {
     NSMatrix *m = (id)view;
     // Cell identity matters: replacing a matrix cell invalidates GTK callbacks.
-    return @[@([m numberOfRows]), @([m numberOfColumns]), [[[m cells] copy] autorelease], [NSValue valueWithSize:m.cellSize], [NSValue valueWithSize:m.intercellSpacing]];
+    // Cell dimensions change as a pane resizes. Synchronize their GTK
+    // allocations without replacing the scene containing the active divider.
+    return @[@([m numberOfRows]), @([m numberOfColumns]), [[[m cells] copy] autorelease]];
   }
   if ([view isKindOfClass:[NSSegmentedControl class]])
     return @[@([(NSSegmentedControl *)view segmentCount]), @([(NSSegmentedControl *)view trackingMode])];
@@ -267,8 +295,9 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
             scroll.hasVerticalScroller ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER);
           gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(peer->scroller), scroll.borderType != NSNoBorder);
           gtk_widget_add_css_class(peer->scroller, "view");
-          gtk_widget_set_size_request(peer->bridge.widget, MAX(1,lround(NSWidth(document.frame)*factor)),
-            MAX(1,lround(NSHeight(document.frame)*factor)));
+          gtk_widget_set_size_request(peer->bridge.widget,
+            scroll.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*factor)):-1,
+            scroll.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*factor)):-1);
           gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->scroller), peer->bridge.widget);
           peer->clip = GTK4NativeClipNew(peer->scroller); g_object_ref_sink(peer->clip);
           gtk_fixed_put(GTK_FIXED(_host->_nativeContent),peer->clip,0,0);
@@ -326,16 +355,29 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
       peer->scale = factor; peer->signature = [nextSignature copy];
       peer->bridge = [[GTK4NativeView alloc] initWithView:view scale:factor];
       if (!peer->bridge) { [peer release]; continue; }
-      peer->clip = GTK4NativeClipNew([peer->bridge widget]); g_object_ref_sink(peer->clip);
+      // A window scene must follow its viewport, even when GTK's constraint
+      // measurement still reflects the previous allocation. Centering an
+      // oversized scene would move its sidebar outside the resized window.
+      peer->fillsWindow=scene || ([view isKindOfClass:[NSSplitView class]] && view.superview==window.contentView
+        && fabs(NSMinX(view.frame))<1 && fabs(NSWidth(view.frame)-NSWidth(view.superview.bounds))<1
+        && fabs(NSHeight(view.frame)-NSHeight(view.superview.bounds))<1);
+      peer->clip = peer->fillsWindow?GTK4NativeClipNewScene([peer->bridge widget]):GTK4NativeClipNew([peer->bridge widget]);
+      g_object_ref_sink(peer->clip);
       GtkEventController *scrollEvents = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
       g_signal_connect_data(scrollEvents, "scroll", G_CALLBACK(controlScroll), [view retain], releaseScrollSource, 0);
       gtk_widget_add_controller(peer->clip, scrollEvents);
-      gtk_fixed_put(GTK_FIXED(_host->_nativeContent), peer->clip, 0, 0);
+      if(peer->fillsWindow) {
+        GtkWidget *overlay=gtk_window_get_child(GTK_WINDOW(_host->_host));
+        g_object_set_data(G_OBJECT(peer->clip),"appkit-native-scene",GINT_TO_POINTER(1));
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay),peer->clip);
+        gtk_overlay_set_measure_overlay(GTK_OVERLAY(overlay),peer->clip,TRUE);
+      } else gtk_fixed_put(GTK_FIXED(_host->_nativeContent), peer->clip, 0, 0);
       [_peers setObject:peer forKey:identity];
       [peer release];
     }
     [peer->bridge synchronize];
-    updateControlBackdrop(peer->clip,view);
+    if(peer->fillsWindow) GTK4NativeClipSetBackground(peer->clip,NULL);
+    else updateControlBackdrop(peer->clip,view);
     NSRect visible = NSIntersectionRect([view bounds], [view visibleRect]);
     BOOL show = !NSIsEmptyRect(visible);
     gtk_widget_set_visible(peer->clip, show);
@@ -351,9 +393,18 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
     CGFloat left = (NSMinX(full)-NSMinX(rect))*factor;
     CGFloat top = ([_host isFlipped] ? NSMinY(full)-NSMinY(rect) : NSMaxY(rect)-NSMaxY(full))*factor;
     GtkAllocation allocation = {lround(left), lround(top), MAX(1,lround(NSWidth(full)*factor)), MAX(1,lround(NSHeight(full)*factor))};
-    GTK4NativeClipSetAllocation(peer->clip, allocation);
-    GtkAllocation placement={hostRect.origin.x,hostRect.origin.y,hostRect.size.width,hostRect.size.height};
-    GTK4NativeClipPlace(peer->clip,_host->_nativeContent,placement);
+    if(peer->fillsWindow) {
+      // GTK allocates this overlay on every native configure, independently
+      // of when the AppKit shadow window receives the corresponding event.
+      gtk_widget_set_margin_top(peer->clip,MAX(0,lround(hostRect.origin.y)));
+      graphene_rect_t actual;
+      if(gtk_widget_compute_bounds(peer->clip,_host->_nativeContent,&actual))
+        hostRect=NSMakeRect(actual.origin.x,actual.origin.y,actual.size.width,actual.size.height);
+    } else {
+      GTK4NativeClipSetAllocation(peer->clip, allocation);
+      GtkAllocation placement={hostRect.origin.x,hostRect.origin.y,hostRect.size.width,hostRect.size.height};
+      GTK4NativeClipPlace(peer->clip,_host->_nativeContent,placement);
+    }
     [rects addObject:[NSValue valueWithRect:hostRect]];
     NSMutableArray *controls=[NSMutableArray arrayWithObject:view];
     while(controls.count) {

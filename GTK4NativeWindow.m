@@ -93,6 +93,18 @@ GtkWindow *GTK4NativeHostForWindow(NSWindow *window)
     return GTK_WINDOW(((GTK4NativeWindowDecorationView *)view)->_host);
   return NULL;
 }
+GtkWidget *GTK4NativeWidgetForView(NSView *source)
+{
+  NSView *view=source.window.contentView;
+  while(view.superview) view=view.superview;
+  if([view isKindOfClass:[GTK4NativeWindowDecorationView class]])
+    {
+      GtkWidget *widget=[((GTK4NativeWindowDecorationView *)view)->_nativeControls widgetForView:source];
+      GtkWidget *scroller=widget?g_object_get_data(G_OBJECT(widget),"appkit-scroll-widget"):NULL;
+      return scroller?:widget;
+    }
+  return NULL;
+}
 static CGFloat nativeTitleHeight(void)
 {
   static CGFloat height;
@@ -124,13 +136,21 @@ static gboolean hostClose(GtkWindow *host, gpointer data)
   [view release];
   return TRUE; // AppKit decides whether an edited document may close.
 }
+static BOOL nativeContentContainsWidget(GTK4NativeWindowDecorationView *view,GtkWidget *widget)
+{
+  if(!widget) return NO;
+  if(view->_nativeContent && gtk_widget_is_ancestor(widget,view->_nativeContent)) return YES;
+  for(GtkWidget *ancestor=widget;ancestor;ancestor=gtk_widget_get_parent(ancestor))
+    if(g_object_get_data(G_OBJECT(ancestor),"appkit-native-scene")) return YES;
+  return NO;
+}
 static BOOL nativeToolbarHasFocus(GTK4NativeWindowDecorationView *view)
 {
   GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
   return focus && ((view->_nativeToolbar && gtk_widget_is_ancestor(focus, view->_nativeToolbar))
     || (view->_nativeToolbarSearch && gtk_widget_is_ancestor(focus, view->_nativeToolbarSearch))
     || focus==view->_appKitContent
-    || (view->_nativeContent && gtk_widget_is_ancestor(focus, view->_nativeContent)));
+    || nativeContentContainsWidget(view,focus));
 }
 static void toolbarItemReleased(gpointer item) { [(id)item release]; }
 static void toolbarClicked(GtkButton *button, gpointer data)
@@ -305,10 +325,11 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   if ((keyval != GDK_KEY_Return && keyval != GDK_KEY_KP_Enter)
       || (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK | GDK_META_MASK))) return FALSE;
   GtkWidget *focus = gtk_root_get_focus(GTK_ROOT(view->_host));
-  if (!focus || !gtk_widget_is_ancestor(focus, view->_nativeContent)) return FALSE;
+  if (!nativeContentContainsWidget(view,focus)) return FALSE;
   // Native text entries retain their own activate signal and editing action.
   for (GtkWidget *widget = focus; widget && widget != view->_nativeContent; widget = gtk_widget_get_parent(widget))
-    if (GTK_IS_EDITABLE(widget) || GTK_IS_POPOVER(widget) || g_object_get_data(G_OBJECT(widget),"appkit-custom-wrapper")) return FALSE;
+    if (GTK_IS_EDITABLE(widget) || GTK_IS_POPOVER(widget)
+        || (widget==focus && g_object_get_data(G_OBJECT(widget),"appkit-custom-wrapper"))) return FALSE;
   GtkWidget *button = gtk_window_get_default_widget(GTK_WINDOW(view->_host));
   return button && gtk_widget_is_sensitive(button) && gtk_widget_get_mapped(button)
     ? gtk_widget_activate(button) : FALSE;
@@ -374,16 +395,21 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
     _nativeTables = [[NSHashTable weakObjectsHashTable] retain];
     _nativeControls = [[GTK4NativeControls alloc] initWithHost:self];
     GtkWidget *contentOverlay = gtk_overlay_new();
-    _nativeBackground = GTK4NativeClipNewFilling(NULL);
+    _nativeBackground = gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
+    gtk_widget_add_css_class(_nativeBackground,"background");
     gtk_overlay_set_child(GTK_OVERLAY(contentOverlay), _nativeBackground);
     CGFloat factor=owner.userSpaceScaleFactor/MAX(1,gtk_widget_get_scale_factor(_host));
     _appKitContent=GTK4NativeWindowContentNew(self,factor);
     _appKitClip=GTK4NativeClipNew(_appKitContent);
     gtk_fixed_put(GTK_FIXED(_nativeContent),_appKitClip,0,0);
-    gtk_overlay_add_overlay(GTK_OVERLAY(contentOverlay), _nativeContent);
+    // GtkFixed measures its children's explicit requests. Keep a previous
+    // viewport allocation from becoming a minimum for the next window size.
+    // The zero-minimum container allocates the fixed layer at GTK's live size.
+    GtkWidget *nativeViewport=GTK4NativeClipNewFilling(_nativeContent);
+    gtk_overlay_add_overlay(GTK_OVERLAY(contentOverlay), nativeViewport);
     // Native peers follow AppKit's pane allocation without imposing the last
     // allocation as a new minimum size on the entire GTK window.
-    gtk_overlay_set_measure_overlay(GTK_OVERLAY(contentOverlay), _nativeContent, FALSE);
+    gtk_overlay_set_measure_overlay(GTK_OVERLAY(contentOverlay), nativeViewport, FALSE);
     gtk_window_set_child(GTK_WINDOW(_host), contentOverlay);
     gtk_widget_add_css_class(_host, "gnustep-native-window");
     GtkEventController *defaultKeys = gtk_event_controller_key_new();
@@ -798,7 +824,10 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
 }
 - (void)synchronizeNativeWindow:(id)sender
 {
-  if (_placing || !_child || !_wantedVisible) return;
+  // GTK callbacks can request AppKit display while a frame or input gesture
+  // still uses this widget tree. Let the host timer synchronize after GTK
+  // returns, including any structural changes that require replacing peers.
+  if (_placing || !_child || !_wantedVisible || g_main_depth()>0) return;
   [self retain];
   _placing = YES;
   @try {
@@ -823,12 +852,10 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
     if (gtk_window_get_modal(GTK_WINDOW(_host)) != modal)
       gtk_window_set_modal(GTK_WINDOW(_host), modal);
     [self updateNativeToolbar];
-    NSColor *background=[[window backgroundColor] colorUsingColorSpaceName:NSDeviceRGBColorSpace];
-    if(background) {
-      GdkRGBA color={background.redComponent,background.greenComponent,background.blueComponent,background.alphaComponent};
-      GTK4NativeClipSetBackground(_nativeBackground,&color);
-    }
     NSMutableArray *nativeRects = [NSMutableArray arrayWithArray:[_nativeControls update]];
+    BOOL fallbackNeeded=hasMenu || (hasToolbar && ![self canHostToolbar])
+      || !GSNativeViewPeerForView(window.contentView);
+    gtk_widget_set_visible(_appKitClip,fallbackNeeded);
     for (GTK4NativeTable *peer in [_nativeTables allObjects]) {
       if ([peer update] && !NSIsEmptyRect([peer hostRect]))
         [nativeRects addObject:[NSValue valueWithRect:[peer hostRect]]];
@@ -894,6 +921,7 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
     graphene_rect_t body;
     if(gtk_widget_compute_bounds(_nativeContent,_host,&body)) {
       CGFloat factor=window.userSpaceScaleFactor/MAX(1,gtk_widget_get_scale_factor(_host));
+      GTK4NativeCustomViewSetScale(_appKitContent,factor);
       GtkAllocation allocation={-lround(body.origin.x),-lround(body.origin.y),
         MAX(1,lround(NSWidth(self.bounds)*factor)),MAX(1,lround(NSHeight(self.bounds)*factor))};
       GTK4NativeClipSetAllocation(_appKitClip,allocation);

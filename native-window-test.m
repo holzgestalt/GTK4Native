@@ -190,11 +190,12 @@ int main(void)
     gtk_widget_get_width(view->_host), gtk_widget_get_height(view->_host), NSStringFromRect([[window contentView] frame]));
   assert(fabs([window frame].size.width - gtk_widget_get_width(view->_host) * gdk_surface_get_scale_factor(gtk_native_get_surface(GTK_NATIVE(view->_host)))) < 2);
   [window makeFirstResponder:field];
-  assert([window fieldEditor:NO forObject:field] == [window firstResponder]);
-  [[window fieldEditor:NO forObject:field] insertText:@"Edited"];
+  GtkWidget *nativeField=GTK4NativeWidgetForView(field);
+  assert(GTK_IS_ENTRY(nativeField) && gtk_widget_is_ancestor(gtk_root_get_focus(GTK_ROOT(view->_host)),nativeField));
+  gtk_editable_set_text(GTK_EDITABLE(nativeField),"Edited");
   [window makeFirstResponder:nil];
   assert([[field stringValue] containsString:@"Edited"]);
-  // Real host input reaches AppKit through the custom GTK content widget.
+  // Real host input stays in the native entry and updates the AppKit model.
   void *xtst = dlopen("libXtst.so.6", RTLD_NOW);
   assert(xtst);
   int (*motion)(Display *, int, int, int, unsigned long) = dlsym(xtst, "XTestFakeMotionEvent");
@@ -217,7 +218,7 @@ int main(void)
   key(display, XKeysymToKeycode(display, XK_a), True, CurrentTime);
   key(display, XKeysymToKeycode(display, XK_a), False, CurrentTime); XFlush(display);
   pump(0.2);
-  assert([[[window fieldEditor:NO forObject:field] string] containsString:@"a"]);
+  assert([[field stringValue] containsString:@"a"]);
   // A toolbar becomes real GTK widgets in the titlebar, with original senders.
   NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"native-test"];
   [toolbar setDisplayMode:NSToolbarDisplayModeIconOnly];
@@ -295,7 +296,7 @@ int main(void)
   assert(delegate->toolbarClicks == 1);
   assert([delegate->toolbarSender isKindOfClass:[NSToolbarItem class]]);
   assert([[[delegate->toolbarSender toolbar] identifier] isEqual:@"native-test"]);
-  // Both toolbar controls and the AppKit editor keep focus in the GTK window.
+  // Both toolbar controls and native text entries keep focus in GTK.
   point = [field convertPoint:NSMakePoint(80,15) toView:nil];
   XTranslateCoordinates(display,view->_child,DefaultRootWindow(display),
     lround(point.x),lround([window frame].size.height-point.y),&px,&py,&ignored);
@@ -305,10 +306,11 @@ int main(void)
   [[NSRunLoop currentRunLoop] addTimer:release forMode:NSDefaultRunLoopMode];
   button(display,1,True,CurrentTime); XFlush(display); pump(.2);
   Window focus; int revert; XGetInputFocus(display,&focus,&revert);
-  assert(focus == view->_parent && gtk_root_get_focus(GTK_ROOT(view->_host)) == view->_appKitContent);
+  nativeField=GTK4NativeWidgetForView(field);
+  assert(focus == view->_parent && gtk_widget_is_ancestor(gtk_root_get_focus(GTK_ROOT(view->_host)),nativeField));
   key(display,XKeysymToKeycode(display,XK_c),True,CurrentTime);
   key(display,XKeysymToKeycode(display,XK_c),False,CurrentTime); XFlush(display); pump(.2);
-  assert([[[window fieldEditor:NO forObject:field] string] containsString:@"c"]);
+  assert([[field stringValue] containsString:@"c"]);
   NSSize withToolbar = [[window contentView] frame].size;
   [toolbar setVisible:NO]; pump(0.2);
   assert(!view->_nativeToolbar);

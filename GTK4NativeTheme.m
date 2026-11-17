@@ -402,6 +402,45 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
   return width > 0 ? width : [super defaultScrollerWidth];
 }
 
+- (NSSize)scrollViewBorderSizeForType:(NSBorderType)type
+{
+  if(!_available) return [super scrollViewBorderSizeForType:type];
+  if(type==NSNoBorder) return NSZeroSize;
+  GtkBorder border;
+  gtk_style_context_get_border(gtk_widget_get_style_context(_renderer.scroll_frame),&border);
+  CGFloat sourceScale=[[NSScreen mainScreen] userSpaceScaleFactor];
+  CGFloat metricScale=gtk_widget_get_scale_factor(_renderer.window)/MAX(.001,sourceScale);
+  return NSMakeSize(MAX(border.left,border.right)*metricScale,MAX(border.top,border.bottom)*metricScale);
+}
+- (BOOL)scrollViewUsesNativeScrollers:(NSScrollView *)view
+{
+  // This also applies before GTK connects or a source view gains its peer.
+  return YES;
+}
+- (void)drawScrollViewRect:(NSRect)rect inView:(NSView *)view
+{
+  // A live GtkScrolledWindow owns the complete frame, background and bars.
+  if (!_available) [super drawScrollViewRect:rect inView:view];
+}
+- (CGFloat)splitViewDividerThickness:(NSSplitView *)view
+{
+  if(!_available) return [super splitViewDividerThickness:view];
+  GtkWidget *separator=_renderer.split_separator[view.isVertical?0:1];
+  if(!separator) return 0;
+  int minimum=0,natural=0;
+  gtk_widget_measure(separator,view.isVertical?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL,
+    -1,&minimum,&natural,NULL,NULL);
+  GtkWindow *host=GTK4NativeHostForWindow(view.window);
+  CGFloat nativeScale=gtk_widget_get_scale_factor(host?GTK_WIDGET(host):_renderer.window);
+  CGFloat sourceScale=view.window?view.window.userSpaceScaleFactor:[[NSScreen mainScreen] userSpaceScaleFactor];
+  return MAX(minimum,natural)*nativeScale/MAX(.001,sourceScale);
+}
+- (BOOL)drawSplitViewDividerInRect:(NSRect)rect inView:(NSSplitView *)view
+{
+  // GtkPaned owns separator painting and input; never draw it into AppKit.
+  return _available;
+}
+
 - (BOOL)prepareScroller:(NSScroller *)scroller geometry:(GTK4ScrollbarGeometry *)geometry
 {
   if (!_available) return NO;
@@ -432,20 +471,8 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 
 - (BOOL)drawNativeScroller:(NSScroller *)scroller dirtyRect:(NSRect)rect
 {
-  GTK4ScrollbarGeometry geometry;
-  if (![self prepareScroller:scroller geometry:&geometry]) return NO;
-  BOOL horizontal = NSWidth([scroller bounds]) > NSHeight([scroller bounds]);
-  GtkStateFlags state = [scroller isEnabled] ? GTK_STATE_FLAG_NORMAL : GTK_STATE_FLAG_INSENSITIVE;
-  if ([scroller isEnabled] && [scroller hitPart] == NSScrollerKnob)
-    state |= GTK_STATE_FLAG_ACTIVE | GTK_STATE_FLAG_PRELIGHT;
-  // Snapshot the complete GTK widget, not separately stretched CSS pieces.
-  // AppKit's dirty-region clip still limits the final paint.
-  // Erase the old thumb against the owning viewport, not a separate track.
-  NSScrollView *owner = [scroller enclosingScrollView];
-  [(owner ? [owner backgroundColor] : [NSColor controlBackgroundColor]) set];
-  NSRectFill(NSIntersectionRect(rect, [scroller bounds]));
-  return [self paintWidget:_renderer.scrollbars[horizontal ? 0 : 1]
-                    state:state frame:[scroller bounds] view:scroller];
+  // GtkScrolledWindow owns its live scrollbars; AppKit contributes no pixels.
+  return _available;
 }
 
 - (id<GSNativeTableView>)nativeTableViewForTableView:(NSTableView *)table

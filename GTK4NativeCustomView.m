@@ -1,5 +1,6 @@
 #import "GTK4NativeCustomView.h"
 #import <GNUstepGUI/GSNativeView.h>
+#import <GNUstepGUI/GSWindowDecorationView.h>
 #include <objc/runtime.h>
 
 @interface GTK4CustomDrawing : NSObject <GSNativeEventSource>
@@ -10,6 +11,7 @@
   CGFloat scale;
   NSRect dirty;
   NSBitmapImageRep *bitmap;
+  NSRect bitmapViewport;
   NSGraphicsContext *context;
   GdkTexture *texture;
   GtkIMContext *input;
@@ -19,6 +21,7 @@
   BOOL dispatching;
   NSMutableArray *pendingEvents;
   BOOL windowContent;
+  NSSize preferredSize;
 }
 - (void)snapshot:(GtkSnapshot *)snapshot;
 - (void)deliver:(NSArray *)request;
@@ -33,30 +36,32 @@ static void customMeasure(GtkWidget *widget, GtkOrientation orientation, int for
   int *minimum, int *natural, int *minimumBaseline, int *naturalBaseline)
 {
   GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
-  NSSize intrinsic=[drawing->source intrinsicContentSize];
-  CGFloat value=orientation==GTK_ORIENTATION_HORIZONTAL ? intrinsic.width : intrinsic.height;
-  CGFloat frame=orientation==GTK_ORIENTATION_HORIZONTAL ? NSWidth(drawing->source.frame) : NSHeight(drawing->source.frame);
-  *minimum=0; *natural=MAX(0,lround((value==NSViewNoIntrinsicMetric ? frame : value)*drawing->scale));
+  CGFloat value=orientation==GTK_ORIENTATION_HORIZONTAL?drawing->preferredSize.width:drawing->preferredSize.height;
+  *minimum=0; *natural=MAX(0,lround(value*drawing->scale));
   if (minimumBaseline) *minimumBaseline=-1;
   if (naturalBaseline) *naturalBaseline=-1;
 }
-static void customAllocate(GtkWidget *widget,int width,int height,int baseline)
-{
-  GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
-  if(drawing->windowContent) return;
-  NSValue *expected=g_object_get_data(G_OBJECT(widget),"appkit-reflected-frame");
-  if(!expected) expected=g_object_get_data(G_OBJECT(widget),"appkit-source-frame");
-  if(expected && !NSEqualRects(drawing->source.frame,expected.rectValue)) return;
-  NSSize size=NSMakeSize(width/drawing->scale,height/drawing->scale);
-  if (!NSEqualSizes(drawing->source.frame.size,size)) [drawing->source setFrameSize:size];
-}
 static void customSnapshot(GtkWidget *widget,GtkSnapshot *snapshot)
 {
-  id bridge=g_object_get_data(G_OBJECT(widget),"appkit-bridge");
-  if (bridge) [bridge performSelector:@selector(reflectContainer:) withObject:[NSValue valueWithPointer:widget]];
   [((GSAppKitWidget *)widget)->drawing snapshot:snapshot];
   for (GtkWidget *child=gtk_widget_get_first_child(widget);child;child=gtk_widget_get_next_sibling(child))
     gtk_widget_snapshot_child(widget,child,snapshot);
+}
+static void customRoot(GtkWidget *widget)
+{
+  GTK_WIDGET_CLASS(gs_appkit_widget_parent_class)->root(widget);
+  GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
+  if (drawing->input) gtk_im_context_set_client_widget(drawing->input,widget);
+}
+static void customUnroot(GtkWidget *widget)
+{
+  GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
+  if (drawing->input) {
+    gtk_im_context_focus_out(drawing->input);
+    gtk_im_context_reset(drawing->input);
+    gtk_im_context_set_client_widget(drawing->input,NULL);
+  }
+  GTK_WIDGET_CLASS(gs_appkit_widget_parent_class)->unroot(widget);
 }
 static void customDispose(GObject *object)
 {
@@ -73,8 +78,9 @@ static void gs_appkit_widget_class_init(GSAppKitWidgetClass *cls)
 {
   G_OBJECT_CLASS(cls)->dispose=customDispose; G_OBJECT_CLASS(cls)->finalize=customFinalize;
   GTK_WIDGET_CLASS(cls)->measure=customMeasure;
-  GTK_WIDGET_CLASS(cls)->size_allocate=customAllocate;
   GTK_WIDGET_CLASS(cls)->snapshot=customSnapshot;
+  GTK_WIDGET_CLASS(cls)->root=customRoot;
+  GTK_WIDGET_CLASS(cls)->unroot=customUnroot;
   gtk_widget_class_set_accessible_role(GTK_WIDGET_CLASS(cls),GTK_ACCESSIBLE_ROLE_GROUP);
 }
 static void gs_appkit_widget_init(GSAppKitWidget *widget)
@@ -138,13 +144,21 @@ static void dragUpdate(GtkGestureDrag *gesture,double x,double y,gpointer data)
 static gboolean keyPressed(GtkEventControllerKey *controller,guint key,guint code,GdkModifierType state,gpointer data)
 {
   GTK4CustomDrawing *drawing=data;
+  GtkRoot *root=gtk_widget_get_root(drawing->widget);
+  // Unhandled descendant keys still belong to GTK's focus/navigation system.
+  // A custom drawing container must not consume native radio/entry navigation.
+  if(!root || gtk_root_get_focus(root)!=drawing->widget) return FALSE;
   GdkEvent *event=gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
   if (key==GDK_KEY_Tab || key==GDK_KEY_ISO_Left_Tab) return FALSE;
   if (drawing->input && event && gtk_im_context_filter_keypress(drawing->input,event)) return TRUE;
   [drawing key:key code:code state:state up:NO]; return TRUE;
 }
 static void keyReleased(GtkEventControllerKey *controller,guint key,guint code,GdkModifierType state,gpointer data)
-{ [(GTK4CustomDrawing *)data key:key code:code state:state up:YES]; }
+{
+  GTK4CustomDrawing *drawing=data;
+  GtkRoot *root=gtk_widget_get_root(drawing->widget);
+  if(root && gtk_root_get_focus(root)==drawing->widget) [drawing key:key code:code state:state up:YES];
+}
 static void focusEnter(GtkEventControllerFocus *controller,gpointer data)
 {
   GTK4CustomDrawing *drawing=data;
@@ -175,8 +189,8 @@ static gboolean windowScrolled(GtkEventControllerScroll *controller,double dx,do
   graphene_point_t position=GRAPHENE_POINT_INIT(x-tx,y-ty),local;
   if(!gtk_widget_compute_point(GTK_WIDGET(native),drawing->widget,&position,&local)) return FALSE;
   NSRect bounds=drawing->source.bounds;
-  NSPoint point=NSMakePoint(NSMinX(bounds)+local.x/MAX(1,gtk_widget_get_width(drawing->widget))*NSWidth(bounds),
-    NSMinY(bounds)+(drawing->source.isFlipped?local.y/MAX(1,gtk_widget_get_height(drawing->widget)):1-local.y/MAX(1,gtk_widget_get_height(drawing->widget)))*NSHeight(bounds));
+  NSPoint point=NSMakePoint(NSMinX(bounds)+local.x/drawing->scale,
+    drawing->source.isFlipped?NSMinY(bounds)+local.y/drawing->scale:NSMaxY(bounds)-local.y/drawing->scale);
   GdkModifierType state=gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
   if(gtk_event_controller_scroll_get_unit(controller)==GDK_SCROLL_UNIT_SURFACE) { dx/=10; dy/=10; }
   NSEvent *wheel=[NSEvent mouseEventWithType:NSScrollWheel location:[drawing->source convertPoint:point toView:nil]
@@ -191,6 +205,13 @@ BOOL GTK4NativeCanWrapView(NSView *view)
   // Framework text, table, GL and scroll implementations need dedicated adapters.
   // A subclass which supplies its own GTK widget uses that explicit adapter.
   if ([view respondsToSelector:@selector(gtk4NativeWidget)]) return NO;
+  // A custom field which overrides drawing (for example a glyph preview)
+  // needs its application content inside a GTK container. Ordinary field
+  // subclasses still use GtkEntry/GtkLabel and their native appearance.
+  if ([view isKindOfClass:[NSTextField class]]
+      && ![view isKindOfClass:[NSComboBox class]]
+      && class_getMethodImplementation(view.class,@selector(drawRect:))
+         != class_getMethodImplementation([NSTextField class],@selector(drawRect:))) return YES;
   if ([view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSTextView class]] || [view isKindOfClass:[NSTableView class]]
       || [view isKindOfClass:[NSScrollView class]] || [view isKindOfClass:[NSClipView class]]
       || [view isKindOfClass:[NSOpenGLView class]]) return NO;
@@ -211,12 +232,23 @@ void GTK4NativeCustomViewInvalidate(GtkWidget *widget,NSRect rect)
   drawing->dirty=NSUnionRect(drawing->dirty,NSIntersectionRect(rect,drawing->source.bounds));
   gtk_widget_queue_draw(widget);
 }
+void GTK4NativeCustomViewSetScale(GtkWidget *widget,CGFloat scale)
+{
+  if(!GTK4NativeIsCustomView(widget) || scale<=0) return;
+  GTK4CustomDrawing *drawing=((GSAppKitWidget *)widget)->drawing;
+  if(fabs(drawing->scale-scale)<.001) return;
+  drawing->scale=scale; drawing->dirty=drawing->source.bounds; drawing->bitmapViewport=NSZeroRect;
+  gtk_widget_queue_draw(widget);
+}
 GtkWidget *GTK4NativeCustomViewNew(NSView *view,CGFloat scale)
 {
   GtkWidget *widget=g_object_new(gs_appkit_widget_get_type(),NULL);
   GTK4CustomDrawing *drawing=[GTK4CustomDrawing new];
   drawing->pendingEvents=[NSMutableArray new];
   drawing->source=[view retain]; drawing->widget=widget; drawing->scale=scale; drawing->dirty=view.bounds;
+  NSSize intrinsic=view.intrinsicContentSize;
+  drawing->preferredSize=NSMakeSize(intrinsic.width==NSViewNoIntrinsicMetric?NSWidth(view.frame):intrinsic.width,
+    intrinsic.height==NSViewNoIntrinsicMetric?NSHeight(view.frame):intrinsic.height);
   ((GSAppKitWidget *)widget)->drawing=drawing;
   g_object_set_data(G_OBJECT(widget),"appkit-custom-wrapper",drawing);
   gtk_widget_set_focusable(widget,[view acceptsFirstResponder]);
@@ -273,7 +305,10 @@ static void drawWindowSubtree(NSView *view,NSRect rect)
   NSGraphicsContext *context=[NSGraphicsContext currentContext];
   [context lockFocusView:view inRect:rect];
   @try {
-    GSDrawNativeView(view,rect);
+    // GtkWindow and native scroll containers own standard backgrounds. The
+    // fallback walk only contributes application content and unmatched views.
+    if (![view isKindOfClass:[GSWindowDecorationView class]] && ![view isKindOfClass:[NSClipView class]])
+      GSDrawNativeView(view,rect);
     for(NSView *child in [[view.subviews copy] autorelease]) {
       NSRect local=NSIntersectionRect([child convertRect:rect fromView:view],child.visibleRect);
       if(NSIsEmptyRect(local)) continue;
@@ -295,24 +330,48 @@ static void drawWindowSubtree(NSView *view,NSRect rect)
   int width=gtk_widget_get_width(widget),height=gtk_widget_get_height(widget);
   int backing=MAX(1,gtk_widget_get_scale_factor(widget));
   if (width<=0 || height<=0 || NSIsEmptyRect(source.bounds)) return;
-  if (!bitmap || bitmap.pixelsWide!=width*backing || bitmap.pixelsHigh!=height*backing) {
+  /* A custom document may be millions of pixels tall. GTK owns clipping;
+   * rasterize only the visible part of unmatched AppKit content, never the
+   * entire document. Standard widgets do not enter this drawing path. */
+  NSRect viewport=NSMakeRect(0,0,width,height);
+  for (GtkWidget *ancestor=gtk_widget_get_parent(widget);ancestor;ancestor=gtk_widget_get_parent(ancestor)) {
+    if (GTK_IS_VIEWPORT(ancestor) || GTK_IS_WINDOW(ancestor)
+        || gtk_widget_get_overflow(ancestor)==GTK_OVERFLOW_HIDDEN) {
+      graphene_rect_t bounds;
+      if (gtk_widget_compute_bounds(ancestor,widget,&bounds))
+        viewport=NSIntersectionRect(viewport,NSMakeRect(bounds.origin.x,bounds.origin.y,bounds.size.width,bounds.size.height));
+    }
+  }
+  if (NSIsEmptyRect(viewport)) return;
+  viewport=NSIntegralRect(viewport);
+  // Source coordinates have a fixed display scale. GTK can resize before
+  // AppKit receives its configure event; that must never stretch menu text
+  // or unmatched custom content to fit the source's previous bounds.
+  NSRect visible=NSMakeRect(NSMinX(source.bounds)+NSMinX(viewport)/scale,
+    source.isFlipped?NSMinY(source.bounds)+NSMinY(viewport)/scale:NSMaxY(source.bounds)-NSMaxY(viewport)/scale,
+    NSWidth(viewport)/scale,NSHeight(viewport)/scale);
+  if (!NSEqualRects(bitmapViewport,viewport)) dirty=NSUnionRect(dirty,visible);
+  bitmapViewport=viewport;
+  int bitmapWidth=lround(NSWidth(viewport)*backing),bitmapHeight=lround(NSHeight(viewport)*backing);
+  if (!bitmap || bitmap.pixelsWide!=bitmapWidth || bitmap.pixelsHigh!=bitmapHeight) {
     [context release]; context=nil; [bitmap release];
-    bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:width*backing pixelsHigh:height*backing
+    bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:bitmapWidth pixelsHigh:bitmapHeight
       bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:32];
     memset(bitmap.bitmapData,0,bitmap.bytesPerRow*bitmap.pixelsHigh);
     context=[[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap] retain];
-    dirty=source.bounds;
+    dirty=visible;
   }
   if (!NSIsEmptyRect(dirty) || !texture) {
-    NSRect rect=NSIsEmptyRect(dirty)?source.bounds:dirty; dirty=NSZeroRect;
+    NSRect rect=NSIsEmptyRect(dirty)?visible:NSIntersectionRect(dirty,visible); dirty=NSZeroRect;
     NSGraphicsContext *previous=[NSGraphicsContext currentContext];
     [NSGraphicsContext setCurrentContext:context]; [NSGraphicsContext saveGraphicsState];
     [context lockFocusView:source inRect:rect];
     @try {
       NSAffineTransform *transform=[NSAffineTransform transform];
-      if (source.isFlipped) { [transform translateXBy:0 yBy:height*backing]; }
-      [transform scaleXBy:width*backing/NSWidth(source.bounds) yBy:(source.isFlipped?-1:1)*height*backing/NSHeight(source.bounds)];
-      [transform translateXBy:-NSMinX(source.bounds) yBy:-NSMinY(source.bounds)]; [transform concat];
+      [transform translateXBy:-NSMinX(viewport)*backing
+        yBy:NSMaxY(viewport)*backing];
+      [transform scaleXBy:scale*backing yBy:(source.isFlipped?-1:1)*scale*backing];
+      [transform translateXBy:-NSMinX(source.bounds) yBy:-(source.isFlipped?NSMinY(source.bounds):NSMaxY(source.bounds))]; [transform concat];
       NSRectClip(rect); NSRectFillUsingOperation(rect,NSCompositeClear);
       if(windowContent) drawWindowSubtree(source,rect); else GSDrawNativeView(source,rect);
     } @finally {
@@ -324,7 +383,7 @@ static void drawWindowSubtree(NSView *view,NSRect rect)
       GDK_MEMORY_R8G8B8A8_PREMULTIPLIED,bytes,bitmap.bytesPerRow);
     g_bytes_unref(bytes); if (texture) g_object_unref(texture); texture=next;
   }
-  graphene_rect_t rect=GRAPHENE_RECT_INIT(0,0,width,height);
+  graphene_rect_t rect=GRAPHENE_RECT_INIT(NSMinX(viewport),NSMinY(viewport),NSWidth(viewport),NSHeight(viewport));
   gtk_snapshot_append_texture(snapshot,texture,&rect);
 }
 - (void)mouse:(NSEventType)type x:(double)x y:(double)y controller:(GtkEventController *)controller
@@ -332,8 +391,8 @@ static void drawWindowSubtree(NSView *view,NSRect rect)
   [self retain];
   @try {
     NSRect bounds=source.bounds;
-    NSPoint local=NSMakePoint(NSMinX(bounds)+x/MAX(1,gtk_widget_get_width(widget))*NSWidth(bounds),
-      NSMinY(bounds)+(source.isFlipped?y/MAX(1,gtk_widget_get_height(widget)):1-y/MAX(1,gtk_widget_get_height(widget)))*NSHeight(bounds));
+    NSPoint local=NSMakePoint(NSMinX(bounds)+x/scale,
+      source.isFlipped?NSMinY(bounds)+y/scale:NSMaxY(bounds)-y/scale);
     NSPoint location=[source convertPoint:local toView:nil];
     GdkModifierType state=gtk_event_controller_get_current_event_state(controller);
     NSEvent *event;
@@ -409,7 +468,7 @@ static void drawWindowSubtree(NSView *view,NSRect rect)
 }
 - (void)dealloc
 {
-  if(input) { gtk_im_context_set_client_widget(input,NULL); g_object_unref(input); }
+  if(input) { g_signal_handlers_disconnect_by_data(input,self); gtk_im_context_focus_out(input); gtk_im_context_set_client_widget(input,NULL); g_object_unref(input); }
   if(texture) g_object_unref(texture);
   [pendingEvents release]; [context release]; [bitmap release];
   if(!windowContent) [source release]; [super dealloc];

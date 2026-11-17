@@ -3,6 +3,7 @@
 
 BOOL GTK4NativeWindowsAvailable(void);
 GtkWindow *GTK4NativeHostForWindow(NSWindow *window);
+GtkWidget *GTK4NativeWidgetForView(NSView *view);
 void GTK4NativeRoundWindowCorners(GtkWidget *widget, gpointer unused);
 double GTK4NativeWindowCornerRadius(GtkWidget *widget);
 

@@ -63,6 +63,26 @@
 - (void)insertText:(id)value { [text release]; text=[value copy]; }
 - (void)dealloc { [text release]; [super dealloc]; }
 @end
+@interface MetricCanvas : NSView @end
+@implementation MetricCanvas
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)rect { [[NSColor blackColor] set]; NSRectFill(NSMakeRect(10,10,32,12)); }
+@end
+static int opaqueMarkerWidth(GtkWidget *widget,CGFloat factor)
+{
+  GdkPaintable *paintable=gtk_widget_paintable_new(widget);
+  GtkSnapshot *snapshot=gtk_snapshot_new();
+  gdk_paintable_snapshot(paintable,GDK_SNAPSHOT(snapshot),gtk_widget_get_width(widget),gtk_widget_get_height(widget));
+  GskRenderNode *node=gtk_snapshot_free_to_node(snapshot);
+  CHECK(node,@"fallback drawing produces a render node");
+  GdkTexture *texture=gsk_renderer_render_texture(gtk_native_get_renderer(gtk_widget_get_native(widget)),node,NULL);
+  int width=gdk_texture_get_width(texture),height=gdk_texture_get_height(texture),count=0;
+  guchar *pixels=g_malloc(width*height*4); gdk_texture_download(texture,pixels,width*4);
+  int row=MIN(height-1,lround(15*factor));
+  for(int x=0;x<width;x++) if(pixels[(row*width+x)*4+3]>=128) count++;
+  g_free(pixels); g_object_unref(texture); gsk_render_node_unref(node); g_object_unref(paintable);
+  return count;
+}
 static Display *display;
 static int (*motionEvent)(Display*,int,int,int,unsigned long);
 static int (*buttonEvent)(Display*,unsigned int,int,unsigned long);
@@ -177,6 +197,20 @@ int main(void)
   [window.contentView setSubviews:@[]]; pump(.15);
   CHECK(GSNativeViewPeerForView(canvas)==nil,@"detachment unregisters native source callbacks");
   [window close]; pump(.1); [window release]; dlclose(lib);
+  // Window/menu fallback bounds can lag a native configure. Drawing must
+  // retain its display scale while GTK shrinks or enlarges that allocation.
+  MetricCanvas *metrics=[[[MetricCanvas alloc] initWithFrame:NSMakeRect(0,0,600,80)] autorelease];
+  GtkWidget *metricWindow=gtk_window_new(); g_object_ref_sink(metricWindow);
+  GtkWidget *fallback=GTK4NativeWindowContentNew(metrics,factor);
+  gtk_window_set_child(GTK_WINDOW(metricWindow),fallback);
+  const int metricWidths[]={240,160,320};
+  for(int i=0;i<3;i++) {
+    gtk_window_set_default_size(GTK_WINDOW(metricWindow),lround(metricWidths[i]*factor),lround(50*factor));
+    gtk_window_present(GTK_WINDOW(metricWindow)); pump(.15);
+    CHECK(fabs(opaqueMarkerWidth(fallback,factor)-32*factor)<=1,@"fallback menu/content metrics never stretch with the allocation");
+    CHECK(NSWidth(metrics.bounds)==600,@"fallback regression exercises stale AppKit bounds");
+  }
+  GTK4NativeWindowContentDetach(fallback); gtk_window_destroy(GTK_WINDOW(metricWindow)); g_object_unref(metricWindow);
   NSLog(@"PASS: native scene, custom pixels/dirty regions, direct invalidation, GTK layout, nested controls/scrolling, mouse/drag/key/focus/text input and teardown");
   [pool drain]; return 0;
 }

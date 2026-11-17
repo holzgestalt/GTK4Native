@@ -8,13 +8,16 @@
 - (GtkWidget *)gtk4NativeWidget;
 @end
 
-/* Optional appearance hints; AppKit retains layout, state and bindings. */
+/* Optional appearance hints; AppKit retains model state and bindings. */
 @protocol GTK4NativeAppearanceHints
 @optional
 /* A nil/empty name uses the NSImageView's image instead of a themed symbol. */
 - (NSString *)gtk4NativeIconName;
 - (BOOL)gtk4NativeCompactRows;
 @end
+
+/* Logical children include inactive tab pages, which AppKit detaches. */
+NSArray *GTK4NativeChildrenForView(NSView *view);
 
 @interface GTK4NativeView : NSObject <GSNativeViewPeer>
 {
@@ -25,6 +28,8 @@
   CGFloat _scale;
   BOOL _invalidated;
   BOOL _reflecting;
+  NSMutableArray *_embeddedTables;
+  BOOL _borrowedRoot;
 }
 + (BOOL)supportsView:(NSView *)view;
 - (id)initWithView:(NSView *)view scale:(CGFloat)scale;

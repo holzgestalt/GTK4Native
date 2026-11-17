@@ -37,6 +37,26 @@ int main(void)
     GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_SELECTED, 80, 28, 1);
   cairo_surface_t *separator = gtk4_renderer_draw(r.menu_separator, GTK_STATE_FLAG_NORMAL, 220, 1, 1);
   fingerprint(menu); fingerprint(menuItem); fingerprint(bar); fingerprint(barItem); fingerprint(separator);
+  cairo_surface_t *scrollFrame=gtk4_renderer_draw(r.scroll_frame,GTK_STATE_FLAG_NORMAL,160,100,1);
+  fingerprint(scrollFrame);
+  cairo_surface_write_to_png(scrollFrame,"/tmp/gtk4-scroll-frame.png");
+  cairo_surface_destroy(scrollFrame);
+  for(int axis=0;axis<2;axis++) {
+    g_assert_nonnull(r.split_separator[axis]);
+    g_assert_cmpstr(gtk_widget_get_css_name(r.split_separator[axis]),==,"separator");
+    g_assert_false(gtk_paned_get_wide_handle(GTK_PANED(r.paned[axis])));
+    int minimum=0,natural=0;
+    gtk_widget_measure(r.split_separator[axis],axis==0?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL,
+      -1,&minimum,&natural,NULL,NULL);
+    int thickness=MAX(minimum,natural);
+    g_assert_cmpint(thickness,>,0);
+    cairo_surface_t *divider=gtk4_renderer_draw(r.split_separator[axis],GTK_STATE_FLAG_NORMAL,
+      axis==0?thickness:160,axis==0?100:thickness,2);
+    fingerprint(divider);
+    g_assert_cmpint(cairo_image_surface_get_width(divider),==,(axis==0?thickness:160)*2);
+    g_print("GTK default %s divider: %d logical pixels\n",axis==0?"vertical":"horizontal",thickness);
+    cairo_surface_destroy(divider);
+  }
   g_assert_cmpint(gtk4_renderer_natural_height(r.menu_item), >, 0);
   GdkRGBA enabledText, disabledText;
   gtk4_renderer_foreground(r.menu_item, GTK_STATE_FLAG_NORMAL, &enabledText);

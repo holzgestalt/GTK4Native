@@ -74,6 +74,17 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
   gtk_window_set_child(GTK_WINDOW(r->window), box);
   r->button = gtk_button_new();
   r->entry = gtk_entry_new();
+  r->scroll_frame=gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(r->scroll_frame),GTK_POLICY_NEVER,GTK_POLICY_NEVER);
+  gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(r->scroll_frame),TRUE);
+  gtk_fixed_put(GTK_FIXED(box),r->scroll_frame,0,0);
+  for(int i=0;i<2;i++) {
+    r->paned[i]=gtk_paned_new(i==0?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL);
+    gtk_paned_set_start_child(GTK_PANED(r->paned[i]),gtk_box_new(GTK_ORIENTATION_VERTICAL,0));
+    gtk_paned_set_end_child(GTK_PANED(r->paned[i]),gtk_box_new(GTK_ORIENTATION_VERTICAL,0));
+    r->split_separator[i]=find_css_node(r->paned[i],"separator");
+    gtk_fixed_put(GTK_FIXED(box),r->paned[i],0,0);
+  }
   for (int i = 0; i < 2; i++) {
     r->scrollbars[i] = gtk_scrollbar_new(i == 0 ? GTK_ORIENTATION_HORIZONTAL
                                               : GTK_ORIENTATION_VERTICAL, NULL);
@@ -119,6 +130,7 @@ gboolean gtk4_renderer_init(GTK4Renderer *r)
   gtk_widget_set_visible(r->window, TRUE);
   gtk_widget_map(r->window);
   gtk_widget_allocate(r->window, 2048, 2048, -1, NULL);
+  for(int i=0;i<2;i++) gtk_widget_allocate(r->paned[i],128,128,-1,NULL);
   return TRUE;
 }
 

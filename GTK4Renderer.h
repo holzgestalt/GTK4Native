@@ -7,6 +7,9 @@ typedef struct {
   GtkWidget *button;
   GtkWidget *entry;
   GtkWidget *scrollbars[2];
+  GtkWidget *scroll_frame;
+  GtkWidget *paned[2];
+  GtkWidget *split_separator[2];
   GtkWidget *menu;
   GtkWidget *menu_source;
   GtkWidget *menu_item;
