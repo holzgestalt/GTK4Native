@@ -25,10 +25,11 @@
   BOOL _pending;
   BOOL _bound;
   gint64 _bindFrame;
+  GObject *_representedItem;
 }
 @end
 @implementation GTK4NativeRow
-- (void)dealloc { [_bridge release]; [super dealloc]; }
+- (void)dealloc { if(_representedItem) g_object_unref(_representedItem); [_bridge release]; [super dealloc]; }
 @end
 static void releaseRow(gpointer data) { [(id)data release]; }
 static void groupToggled(GtkButton *button, gpointer data)
@@ -66,6 +67,25 @@ static void setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer
   g_object_set_data_full(G_OBJECT(item), "appkit-row", row, releaseRow);
   [((GTK4NativeTable *)data)->_rows addObject:row];
 }
+static void updateOutlineRow(GTK4NativeTable *peer,GTK4NativeRow *row)
+{
+  if(![peer->_table isKindOfClass:NSOutlineView.class]) return;
+  NSUInteger index=gtk_list_item_get_position(row->_item);
+  if(index>=[peer->_table numberOfRows]) return;
+  NSOutlineView *outline=(id)peer->_table;
+  id object=[outline itemAtRow:index];
+  BOOL expandable=[outline isExpandable:object],synchronizing=peer->_synchronizing;
+  peer->_synchronizing=YES;
+  // Leaves retain the triangle's space so siblings share the same text edge.
+  gtk_widget_set_visible(row->_expander,TRUE);
+  gtk_widget_set_opacity(row->_expander,expandable?1:0);
+  gtk_widget_set_sensitive(row->_expander,expandable);
+  const char *icon=[outline isItemExpanded:object]?"pan-down-symbolic":"pan-end-symbolic";
+  if(g_strcmp0(gtk_button_get_icon_name(GTK_BUTTON(row->_expander)),icon))
+    gtk_button_set_icon_name(GTK_BUTTON(row->_expander),icon);
+  peer->_synchronizing=synchronizing;
+  gtk_widget_set_margin_start(row->_box,4+MAX(0,[outline levelForRow:index])*outline.indentationPerLevel*peer->_scale);
+}
 static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
 {
   GtkListItem *item = row->_item;
@@ -95,33 +115,26 @@ static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
     gtk_box_append(GTK_BOX(row->_box), native);
   }
   [row->_bridge synchronize];
+  g_set_object(&row->_representedItem,gtk_list_item_get_item(item));
   gtk_widget_set_size_request([row->_bridge widget], -1,
     MAX(1, ceil([peer->_table _rowHeightForRow:index] * peer->_scale)));
   gtk_widget_set_margin_start(row->_box, 4);
   gtk_widget_set_margin_end(row->_box, 4);
-  if ([peer->_table isKindOfClass:[NSOutlineView class]]) {
-    NSOutlineView *outline = (id)peer->_table;
-    id object = [outline itemAtRow:index];
-    BOOL expandable = [outline isExpandable:object];
-    peer->_synchronizing = YES;
-    /* Leaves keep the triangle's space so siblings share one text edge. */
-    gtk_widget_set_visible(row->_expander, TRUE);
-    gtk_widget_set_opacity(row->_expander, expandable ? 1 : 0);
-    gtk_widget_set_sensitive(row->_expander, expandable);
-    gtk_button_set_icon_name(GTK_BUTTON(row->_expander), [outline isItemExpanded:object] ? "pan-down-symbolic" : "pan-end-symbolic");
-    peer->_synchronizing = NO;
-    gtk_widget_set_margin_start(row->_box, 4 + MAX(0, [outline levelForRow:index]) * [outline indentationPerLevel] * peer->_scale);
-  }
+  updateOutlineRow(peer,row);
 }
 static void bindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
 {
   GTK4NativeTable *peer = data;
   GTK4NativeRow *row = g_object_get_data(G_OBJECT(item), "appkit-row");
-  row->_pending = YES;
   row->_bound = YES;
-  GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
-  row->_bindFrame=clock?gdk_frame_clock_get_frame_counter(clock):-1;
-  if (row->_bridge) gtk_widget_set_visible(row->_bridge.widget,FALSE);
+  // A position change can rebind an unchanged model item. Keep its existing
+  // content visible; only a different item needs deferred population.
+  if(!row->_bridge || row->_representedItem!=gtk_list_item_get_item(item) || row->_generation!=peer->_generation) {
+    row->_pending=YES;
+    GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
+    row->_bindFrame=clock?gdk_frame_clock_get_frame_counter(clock):-1;
+    if(row->_bridge) gtk_widget_set_visible(row->_bridge.widget,FALSE);
+  }
   guint position = gtk_list_item_get_position(item);
   gtk_widget_set_size_request(row->_box,-1, position < [peer->_table numberOfRows]
     ? MAX(1,ceil([peer->_table _rowHeightForRow:position] * peer->_scale)) : 1);
@@ -225,6 +238,11 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   [[NSNotificationCenter defaultCenter] addObserver:peer selector:@selector(selectionChanged:)
     name:[table isKindOfClass:[NSOutlineView class]] ? NSOutlineViewSelectionDidChangeNotification
       : NSTableViewSelectionDidChangeNotification object:table];
+  if([table isKindOfClass:NSOutlineView.class]) {
+    for(NSString *name in @[NSOutlineViewItemWillExpandNotification,NSOutlineViewItemWillCollapseNotification,
+        NSOutlineViewItemDidExpandNotification,NSOutlineViewItemDidCollapseNotification])
+      [[NSNotificationCenter defaultCenter] addObserver:peer selector:@selector(disclosureChanged:) name:name object:table];
+  }
   [peer reloadData];
   return peer;
 }
@@ -250,23 +268,48 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
 - (void)reloadData
 {
   if (!_model || !_table) return;
-  _generation++;
+  BOOL outline=[_table isKindOfClass:NSOutlineView.class];
+  BOOL disclosure=outline && _outlineDisclosureChanged;
+  if(!disclosure) _generation++;
+  BOOL synchronizing=_synchronizing;
   _synchronizing = YES;
   guint count = [_table numberOfRows];
-  gpointer *items = g_new(gpointer, MAX(count, 1));
-  for (guint i = 0; i < count; i++) items[i] = g_object_new(G_TYPE_OBJECT, NULL);
-  g_list_store_splice(_model, 0, g_list_model_get_n_items(G_LIST_MODEL(_model)), items, count);
-  for (guint i = 0; i < count; i++) g_object_unref(items[i]);
+  guint oldCount=g_list_model_get_n_items(G_LIST_MODEL(_model)),prefix=0,suffix=0;
+  if(outline) {
+    NSMutableArray *next=[NSMutableArray arrayWithCapacity:count];
+    for(guint i=0;i<count;i++) [next addObject:[(NSOutlineView *)_table itemAtRow:i]];
+    while(prefix<MIN(oldCount,count) && _outlineItems[prefix]==next[prefix]) prefix++;
+    while(suffix<MIN(oldCount,count)-prefix && _outlineItems[oldCount-1-suffix]==next[count-1-suffix]) suffix++;
+    ASSIGNCOPY(_outlineItems,next);
+  }
+  guint added=count-prefix-suffix,removed=oldCount-prefix-suffix;
+  gpointer *items=g_new(gpointer,MAX(added,1));
+  for(guint i=0;i<added;i++) items[i]=g_object_new(G_TYPE_OBJECT,NULL);
+  if(added || removed) g_list_store_splice(_model,prefix,removed,items,added);
+  for(guint i=0;i<added;i++) g_object_unref(items[i]);
   g_free(items);
-  _synchronizing = NO;
+  if(outline && !disclosure) for(GTK4NativeRow *row in [_rows allObjects]) if(row->_bound) row->_pending=YES;
+  _synchronizing = synchronizing;
   [self selectionChanged:nil];
+}
+- (void)disclosureChanged:(NSNotification *)notification
+{
+  // Recursive expansion can issue several reloads before the host updates.
+  // They all describe disclosure changes, not requests to recreate row views.
+  _outlineDisclosureChanged=YES;
 }
 - (void)selectionChanged:(NSNotification *)notification
 {
   if (_synchronizing || !_selection || !_table) return;
   _synchronizing = YES;
-  GtkBitset *selected = gtk_bitset_new_empty();
   NSIndexSet *indexes = [_table selectedRowIndexes];
+  if(GTK_IS_SINGLE_SELECTION(_selection)) {
+    NSUInteger selected=indexes.firstIndex;
+    gtk_single_selection_set_selected(GTK_SINGLE_SELECTION(_selection),selected==NSNotFound?GTK_INVALID_LIST_POSITION:(guint)selected);
+    _synchronizing=NO;
+    return;
+  }
+  GtkBitset *selected = gtk_bitset_new_empty();
   for (NSUInteger index = [indexes firstIndex]; index != NSNotFound; index = [indexes indexGreaterThanIndex:index])
     gtk_bitset_add(selected, index);
   GtkBitset *mask = gtk_bitset_new_range(0, [_table numberOfRows]);
@@ -280,6 +323,7 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
     [self invalidate]; return NO;
   }
   NSScrollView *scroll = [_table enclosingScrollView];
+  _outlineDisclosureChanged=NO;
   gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(_scroller),scroll.borderType!=NSNoBorder);
   if (_embedded) {
     graphene_rect_t allocated;
@@ -294,6 +338,7 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
       if (!gtk_widget_compute_bounds(row->_box,_scroller,&rowRect)
           || rowRect.origin.y+rowRect.size.height<=0 || rowRect.origin.y>=gtk_widget_get_height(_scroller)) continue;
       if (row->_pending) populateRow(self,row);
+      updateOutlineRow(self,row);
       if (row->_bridge) [row->_bridge synchronize];
     }
     return YES;
@@ -351,6 +396,7 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
     // GTK prefetches list items well outside the viewport. Their lightweight
     // placeholders need no Objective-C template/bindings until actually seen.
     if (row->_pending) populateRow(self,row);
+    updateOutlineRow(self,row);
     if (row->_bridge) [row->_bridge synchronize];
   }
   return YES;
@@ -402,6 +448,6 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   if (_scroller) g_object_unref(_scroller);
   if (_selection) g_object_unref(_selection);
   if (_model) g_object_unref(_model);
-  [_rows release]; [super dealloc];
+  [_outlineItems release]; [_rows release]; [super dealloc];
 }
 @end

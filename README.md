@@ -83,6 +83,12 @@ their existing row widgets, selection models and scroll adjustments. The live
 resize regression also checks that pane content changes do not unmap or reload
 the sibling table and outline.
 
+Outline disclosure changes splice only the affected descendant rows into the
+GTK list model. Surviving model items and cell widgets stay attached, including
+when their row positions shift. `bash native/GTK4Native/scripts/test-outline-update.sh`
+checks real disclosure clicks, stable surrounding rows, selection, recursive
+expansion/collapse, explicit content reloads and idle rendering.
+
 The plugin requires these local `libs-gui` commits, or equivalent changes:
 
 - `bb3a532e9`: preserve field-editor transparency in clip views.

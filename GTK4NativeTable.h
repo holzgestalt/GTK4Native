@@ -20,6 +20,8 @@
   BOOL _embedded;
   CGFloat _scale;
   NSUInteger _generation;
+  NSArray *_outlineItems;
+  BOOL _outlineDisclosureChanged;
 }
 + (id)peerForTable:(NSTableView *)table;
 - (BOOL)update;
