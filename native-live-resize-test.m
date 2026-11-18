@@ -111,26 +111,29 @@ static void fits(GtkWidget *widget,NSView *source,GTK4NativeWindowDecorationView
 }
 static void opaque(GtkWidget *widget,GTK4NativeWindowDecorationView *host)
 {
-  GdkPaintable *paintable=gtk_widget_paintable_new(widget);
   GtkSnapshot *snapshot=gtk_snapshot_new();
-  int width=gtk_widget_get_width(widget),height=gtk_widget_get_height(widget);
-  gdk_paintable_snapshot(paintable,GDK_SNAPSHOT(snapshot),width,height);
+  // Capture the live widget directly. A newly created GtkWidgetPaintable may
+  // not yet have received a cached image when its GtkBox parent is unchanged.
+  gtk_widget_snapshot_child(gtk_widget_get_parent(widget),widget,snapshot);
   GskRenderNode *node=gtk_snapshot_free_to_node(snapshot);
   CHECK(node,@"native viewport produces a render node");
-  graphene_rect_t area=GRAPHENE_RECT_INIT(0,0,width,height);
+  graphene_rect_t area;
+  CHECK(gtk_widget_compute_bounds(widget,gtk_widget_get_parent(widget),&area),@"snapshot allocation is available");
   GdkTexture *texture=gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(host->_host)),node,&area);
+  int width=gdk_texture_get_width(texture),height=gdk_texture_get_height(texture);
   guchar *pixels=g_malloc(width*height*4);
   gdk_texture_download(texture,pixels,width*4);
   /* Empty areas below the short outline and inside plain views must never
    * make the composed window transparent. Ignore text and scrollbar edges. */
   CHECK(pixels[((height*3/4)*width+width/2)*4+3]==255,@"native viewport background is opaque below its content");
-  g_free(pixels); g_object_unref(texture); gsk_render_node_unref(node); g_object_unref(paintable);
+  g_free(pixels); g_object_unref(texture); gsk_render_node_unref(node);
 }
 
 static int (*movePointer)(Display *,int,int,int,unsigned long);
 static int (*pointerButton)(Display *,unsigned int,int,unsigned long);
 static void modelChanged(GListModel *model,guint position,guint removed,guint added,gpointer count)
 { (*(NSUInteger *)count)++; }
+static void unmapped(GtkWidget *widget,gpointer count) { (*(NSUInteger *)count)++; }
 static gboolean depthProbe(gpointer data)
 {
   CHECK(g_main_depth()==1,@"AppKit synchronization does not reenter GTK's active frame");
@@ -291,6 +294,24 @@ int main(void)
       CHECK(G_LIST_MODEL(peers[0]->_model)==models[0] && G_LIST_MODEL(peers[1]->_model)==models[1],@"resizing keeps native list models");
       pump(.025);
     }
+    NSUInteger unmaps=0;
+    gulong unmapHandlers[2]={g_signal_connect(peers[0]->_list,"unmap",G_CALLBACK(unmapped),&unmaps),
+      g_signal_connect(peers[1]->_list,"unmap",G_CALLBACK(unmapped),&unmaps)};
+    GtkWidget *stableSplit=[host->_nativeControls widgetForView:split];
+    GtkWidget *stableLists[2]={peers[0]->_list,peers[1]->_list};
+    NSUInteger oldTemplates=data->templates;
+    for(NSUInteger change=0;change<4;change++) {
+      NSButton *content=[[[NSButton alloc] initWithFrame:NSMakeRect(10,10,130,28)] autorelease];
+      content.title=[NSString stringWithFormat:@"Editor %lu",(unsigned long)change];
+      [plain addSubview:content]; pump(.12);
+      CHECK(GTK_IS_BUTTON([host->_nativeControls widgetForView:content]),@"new pane content is attached to GTK");
+      CHECK([host->_nativeControls widgetForView:split]==stableSplit && peers[0]->_list==stableLists[0]
+        && peers[1]->_list==stableLists[1],@"replacing editor content keeps its sibling widgets");
+      [content removeFromSuperview]; pump(.12);
+    }
+    CHECK(unmaps==0 && reloads==0 && data->templates==oldTemplates,
+      @"editor content changes never unmap, reload or recreate sibling table rows");
+    for(int i=0;i<2;i++) g_signal_handler_disconnect(stableLists[i],unmapHandlers[i]);
     opaque(peers[1].widget,host);
     opaque(host->_nativeBackground,host);
     /* The right pane must use the AppKit drawing adapter during the drag,

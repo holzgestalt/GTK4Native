@@ -77,6 +77,12 @@ schedule layout or rebuild button contents for equal values: that keeps GTK
 rendering continuously and wastes compositor CPU. The test also checks that
 changed titles repaint and native window resizing still allocates the content.
 
+Split panes have separate adapters in stable GTK containers. Replacing an
+editor's content updates that pane alone; sibling lists remain mapped with
+their existing row widgets, selection models and scroll adjustments. The live
+resize regression also checks that pane content changes do not unmap or reload
+the sibling table and outline.
+
 The plugin requires these local `libs-gui` commits, or equivalent changes:
 
 - `bb3a532e9`: preserve field-editor transparency in clip views.

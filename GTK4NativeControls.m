@@ -122,64 +122,12 @@ static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer)
 }
 @end
 
-static NSArray *structure(NSView *view);
-static void documentStructureInternal(NSView *view,NSMutableArray *signature,BOOL root)
-{
-  id peer=GSNativeViewPeerForView(view);
-  NSRect frame=[peer respondsToSelector:@selector(configurationFrameForView:)]?[peer configurationFrameForView:view]:view.frame;
-  [signature addObject:@[[NSValue valueWithPointer:view],[NSValue valueWithRect:root?NSZeroRect:frame],
-    @(view.isFlipped),@(view.translatesAutoresizingMaskIntoConstraints),@(root?0:view.autoresizingMask)]];
-  [signature addObject:structure(view)];
-  for(NSLayoutConstraint *c in view.constraints)
-    [signature addObject:@[[NSValue valueWithPointer:c],@(c.constant),@(c.priority)]];
-  if([view isKindOfClass:[NSScrollView class]]) {
-    NSScrollView *scroll=(id)view;
-    [signature addObject:@[@(scroll.hasHorizontalScroller),@(scroll.hasVerticalScroller),@(scroll.borderType),
-      @(scroll.rulersVisible),@(scroll.hasHorizontalRuler),@(scroll.hasVerticalRuler),
-      [NSValue valueWithPointer:scroll.horizontalRulerView],[NSValue valueWithPointer:scroll.verticalRulerView]]];
-    if(scroll.documentView) documentStructureInternal(scroll.documentView,signature,YES);
-  } else {
-    BOOL managed=[view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]];
-    for(NSView *child in GTK4NativeChildrenForView(view)) documentStructureInternal(child,signature,managed);
-  }
-}
-static void documentStructure(NSView *view,NSMutableArray *signature) { documentStructureInternal(view,signature,YES); }
-
 static BOOL buttonControl(NSView *view)
 {
   return [view isKindOfClass:[NSPathControl class]] || [view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSComboBox class]] || [view isKindOfClass:[NSSlider class]]
     || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSButton class]]
     || [view isKindOfClass:[NSSwitch class]] || [view isKindOfClass:[NSSegmentedControl class]]
     || [view isKindOfClass:[NSMatrix class]];
-}
-static NSArray *structure(NSView *view)
-{
-  if ([view isKindOfClass:[NSSplitView class]]) return @[@([(NSSplitView *)view isVertical])];
-  if([view isKindOfClass:[NSTabView class]]) {
-    NSMutableArray *items=[NSMutableArray arrayWithObject:@([(NSTabView *)view tabViewType])];
-    for(NSTabViewItem *item in [(NSTabView *)view tabViewItems])
-      [items addObject:@[item,[NSValue valueWithPointer:item.view]]];
-    return items;
-  }
-  if([view isKindOfClass:[NSBox class]]) return @[@([(NSBox *)view boxType]),@([(NSBox *)view borderType])];
-  if ([view isKindOfClass:[NSStepper class]]) return @[@([(NSStepper *)view gtk4NativeUsesSpinButton])];
-  if ([view isKindOfClass:[NSProgressIndicator class]])
-    return @[@([(NSProgressIndicator *)view style]==NSProgressIndicatorSpinningStyle && [(NSProgressIndicator *)view isIndeterminate])];
-  if ([view isKindOfClass:[NSMatrix class]]) {
-    NSMatrix *m = (id)view;
-    // Cell identity matters: replacing a matrix cell invalidates GTK callbacks.
-    // Cell dimensions change as a pane resizes. Synchronize their GTK
-    // allocations without replacing the scene containing the active divider.
-    return @[@([m numberOfRows]), @([m numberOfColumns]), [[[m cells] copy] autorelease]];
-  }
-  if ([view isKindOfClass:[NSSegmentedControl class]])
-    return @[@([(NSSegmentedControl *)view segmentCount]), @([(NSSegmentedControl *)view trackingMode])];
-  if ([view isKindOfClass:[NSPopUpButton class]]) return @[@([(NSPopUpButton *)view pullsDown])];
-  if ([view isKindOfClass:[NSButton class]]) {
-    NSButtonCell *cell = [(NSButton *)view cell];
-    return @[[[cell image] name] ?: @"", @([cell showsStateBy])];
-  }
-  return @[];
 }
 static NSColor *controlBackdrop(NSView *view)
 {
@@ -283,7 +231,7 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
       if ([scroll class] == [NSScrollView class] && document && ![scroll rulersVisible]
           && [GTK4NativeView supportsView:document]) {
         NSValue *identity = key(view); [seenScrolls addObject:identity];
-        NSMutableArray *next = [NSMutableArray array]; documentStructure(document, next);
+        NSMutableArray *next = [NSMutableArray array]; [next addObjectsFromArray:GTK4NativeStructureForView(document)];
         [next addObject:@[@(scroll.hasVerticalScroller), @(scroll.hasHorizontalScroller), @(scroll.borderType)]];
         GTK4ScrollPeer *peer = [_scrollPeers objectForKey:identity];
         if (peer && (fabs(peer->scale-factor) > .001 || ![peer->signature isEqual:next])) {
@@ -366,7 +314,7 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
     NSValue *identity = key(view); [seen addObject:identity];
     GTK4ControlPeer *peer = [_peers objectForKey:identity];
     NSMutableArray *nextSignature=[NSMutableArray array];
-    documentStructure(view,nextSignature);
+    [nextSignature addObjectsFromArray:GTK4NativeStructureForView(view)];
     if (peer && (fabs(peer->scale-factor) > .001 || ![peer->signature isEqual:nextSignature])) {
       [peer->bridge invalidate];
       GTK4NativeClipSetChild(peer->clip,NULL);

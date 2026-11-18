@@ -553,6 +553,88 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     disconnectBridgeCallbacks(child, bridge);
 }
 
+static NSArray *structure(NSView *view);
+static void documentStructureInternal(NSView *view,NSMutableArray *signature,BOOL root)
+{
+  id peer=GSNativeViewPeerForView(view);
+  NSRect frame=[peer respondsToSelector:@selector(configurationFrameForView:)]?[peer configurationFrameForView:view]:view.frame;
+  [signature addObject:@[[NSValue valueWithPointer:view],[NSValue valueWithRect:root?NSZeroRect:frame],
+    @(view.isFlipped),@(view.translatesAutoresizingMaskIntoConstraints),@(root?0:view.autoresizingMask)]];
+  [signature addObject:structure(view)];
+  for(NSLayoutConstraint *c in view.constraints)
+    [signature addObject:@[[NSValue valueWithPointer:c],@(c.constant),@(c.priority)]];
+  if([view isKindOfClass:[NSScrollView class]]) {
+    NSScrollView *scroll=(id)view;
+    [signature addObject:@[@(scroll.hasHorizontalScroller),@(scroll.hasVerticalScroller),@(scroll.borderType),
+      @(scroll.rulersVisible),@(scroll.hasHorizontalRuler),@(scroll.hasVerticalRuler),
+      [NSValue valueWithPointer:scroll.horizontalRulerView],[NSValue valueWithPointer:scroll.verticalRulerView]]];
+    if(scroll.documentView) documentStructureInternal(scroll.documentView,signature,YES);
+  } else if([view isKindOfClass:[NSSplitView class]]) {
+    // Each pane owns its descendants. Changing an editor must not replace
+    // the split or unmap its sibling's native list and scroll view.
+    for(NSView *pane in view.subviews) [signature addObject:[NSValue valueWithPointer:pane]];
+  } else {
+    BOOL managed=[view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]];
+    for(NSView *child in GTK4NativeChildrenForView(view)) documentStructureInternal(child,signature,managed);
+  }
+}
+NSArray *GTK4NativeStructureForView(NSView *view)
+{
+  NSMutableArray *signature=[NSMutableArray array];
+  documentStructureInternal(view,signature,YES);
+  return signature;
+}
+
+
+static NSArray *structure(NSView *view)
+{
+  if ([view isKindOfClass:[NSSplitView class]]) return @[@([(NSSplitView *)view isVertical])];
+  if([view isKindOfClass:[NSTabView class]]) {
+    NSMutableArray *items=[NSMutableArray arrayWithObject:@([(NSTabView *)view tabViewType])];
+    for(NSTabViewItem *item in [(NSTabView *)view tabViewItems])
+      [items addObject:@[item,[NSValue valueWithPointer:item.view]]];
+    return items;
+  }
+  if([view isKindOfClass:[NSBox class]]) return @[@([(NSBox *)view boxType]),@([(NSBox *)view borderType])];
+  if ([view isKindOfClass:[NSStepper class]]) return @[@([(NSStepper *)view gtk4NativeUsesSpinButton])];
+  if ([view isKindOfClass:[NSProgressIndicator class]])
+    return @[@([(NSProgressIndicator *)view style]==NSProgressIndicatorSpinningStyle && [(NSProgressIndicator *)view isIndeterminate])];
+  if ([view isKindOfClass:[NSMatrix class]]) {
+    NSMatrix *m = (id)view;
+    // Cell identity matters: replacing a matrix cell invalidates GTK callbacks.
+    // Cell dimensions change as a pane resizes. Synchronize their GTK
+    // allocations without replacing the scene containing the active divider.
+    return @[@([m numberOfRows]), @([m numberOfColumns]), [[[m cells] copy] autorelease]];
+  }
+  if ([view isKindOfClass:[NSSegmentedControl class]])
+    return @[@([(NSSegmentedControl *)view segmentCount]), @([(NSSegmentedControl *)view trackingMode])];
+  if ([view isKindOfClass:[NSPopUpButton class]]) return @[@([(NSPopUpButton *)view pullsDown])];
+  if ([view isKindOfClass:[NSButton class]]) {
+    NSButtonCell *cell = [(NSButton *)view cell];
+    return @[[[cell image] name] ?: @"", @([cell showsStateBy])];
+  }
+  return @[];
+}
+
+// A stable GTK slot separates a split pane's content lifetime from its
+// siblings. Replacing content only tears down that pane's adapter.
+@interface GTK4NativePane : NSObject
+{
+@public
+  GTK4NativeView *bridge;
+  GtkWidget *slot;
+  NSArray *signature;
+}
+@end
+@implementation GTK4NativePane
+- (void)dealloc
+{
+  [bridge invalidate]; [bridge release];
+  if(slot) g_object_unref(slot);
+  [signature release]; [super dealloc];
+}
+@end
+
 @implementation GTK4NativeView
 + (BOOL)supportsView:(NSView *)view
 {
@@ -626,6 +708,8 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   if ((self = [super init])) {
     _view = [view retain]; _scale = scale;
     _embeddedTables=[NSMutableArray new];
+    _paneScenes=[[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsObjectPointerPersonality
+      | NSPointerFunctionsStrongMemory valueOptions:NSPointerFunctionsStrongMemory capacity:2];
     _widgets = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsObjectPointerPersonality
       | NSPointerFunctionsStrongMemory valueOptions:NSPointerFunctionsStrongMemory capacity:8];
     _widget = [self build:view];
@@ -634,6 +718,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     for (GTK4NativeTable *table in _embeddedTables) if (table.widget==_widget) _borrowedRoot=YES;
     [self synchronize];
     for (NSView *source in _widgets) {
+      if([_paneScenes objectForKey:source]) continue;
       if ([source isKindOfClass:[NSTableView class]] && [source valueForKey:@"_nativeTableView"]) continue;
       GSSetNativeViewPeer(source,self);
       [source setNeedsDisplay:NO];
@@ -643,7 +728,56 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
 }
 - (GtkWidget *)widget { return _widget; }
 - (NSView *)view { return _view; }
-- (GtkWidget *)widgetForView:(NSView *)view { return [[_widgets objectForKey:view] pointerValue]; }
+- (GtkWidget *)widgetForView:(NSView *)view
+{
+  GTK4NativePane *owner=[_paneScenes objectForKey:view];
+  if(owner) return [owner->bridge widgetForView:view];
+  GtkWidget *widget=[[_widgets objectForKey:view] pointerValue];
+  if(widget) return widget;
+  for(GTK4NativePane *pane in [_paneScenes objectEnumerator]) {
+    widget=[pane->bridge widgetForView:view];
+    if(widget) return widget;
+  }
+  return NULL;
+}
+- (GtkWidget *)buildPane:(NSView *)view
+{
+  GTK4NativePane *pane=[GTK4NativePane new];
+  pane->signature=[GTK4NativeStructureForView(view) copy];
+  pane->bridge=[[GTK4NativeView alloc] initWithView:view scale:_scale];
+  if(!pane->bridge) { [pane release]; return NULL; }
+  pane->slot=gtk_box_new(GTK_ORIENTATION_VERTICAL,0); g_object_ref_sink(pane->slot);
+  gtk_widget_set_hexpand(pane->bridge.widget,TRUE);
+  gtk_widget_set_vexpand(pane->bridge.widget,TRUE);
+  gtk_box_append(GTK_BOX(pane->slot),pane->bridge.widget);
+  [_widgets setObject:[NSValue valueWithPointer:pane->slot] forKey:view];
+  [_paneScenes setObject:pane forKey:view];
+  [pane release];
+  return pane->slot;
+}
+- (void)synchronizePanes
+{
+  if(g_main_depth()>0) return;
+  for(NSView *view in _paneScenes) {
+    GTK4NativePane *pane=[_paneScenes objectForKey:view];
+    gtk_widget_set_visible(pane->slot,!view.isHidden);
+    NSArray *next=GTK4NativeStructureForView(view);
+    if(![pane->signature isEqual:next]) {
+      [pane->bridge invalidate];
+      if(pane->bridge && gtk_widget_get_parent(pane->bridge.widget)==pane->slot)
+        gtk_box_remove(GTK_BOX(pane->slot),pane->bridge.widget);
+      [pane->bridge release];
+      pane->bridge=[[GTK4NativeView alloc] initWithView:view scale:_scale];
+      if(pane->bridge) {
+        gtk_widget_set_hexpand(pane->bridge.widget,TRUE);
+        gtk_widget_set_vexpand(pane->bridge.widget,TRUE);
+        gtk_box_append(GTK_BOX(pane->slot),pane->bridge.widget);
+      }
+      ASSIGNCOPY(pane->signature,next);
+    }
+    [pane->bridge synchronize];
+  }
+}
 - (GtkWidget *)build:(NSView *)view
 {
   NSArray *input=layoutInput(view);
@@ -657,7 +791,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       gtk_paned_set_shrink_start_child(GTK_PANED(widget),FALSE);
       gtk_paned_set_shrink_end_child(GTK_PANED(widget),FALSE);
       if(panes.count) {
-        GtkWidget *child=[self build:panes[0]];
+        GtkWidget *child=[self buildPane:panes[0]];
         gtk_paned_set_start_child(GTK_PANED(widget),child);
         g_object_set_data(G_OBJECT(child),"appkit-content-owner",view);
       }
@@ -669,7 +803,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       g_object_set_data(G_OBJECT(paned),"appkit-split-index",GUINT_TO_POINTER(i));
       g_object_set_data(G_OBJECT(paned),"appkit-bridge",self);
       NSView *pane=panes[i];
-      GtkWidget *child=[self build:pane];
+      GtkWidget *child=[self buildPane:pane];
       CGFloat startMinimum=splitPaneMinimum(split,i),endMinimum=0;
       for(NSUInteger remaining=i+1;remaining<panes.count;remaining++)
         endMinimum+=splitPaneMinimum(split,remaining);
@@ -700,7 +834,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       previous=paned;
       g_signal_connect(paned,"notify::position",G_CALLBACK(splitPositionChanged),self);
     }
-    GtkWidget *last=[self build:panes.lastObject];
+    GtkWidget *last=[self buildPane:panes.lastObject];
     splitMinimumRequest(last,split.isVertical,GPOINTER_TO_INT(g_object_get_data(G_OBJECT(previous),"appkit-end-minimum")),1);
     gtk_paned_set_end_child(GTK_PANED(previous),last);
     g_object_set_data(G_OBJECT(last),"appkit-content-owner",view);
@@ -1190,10 +1324,12 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   [self retain];
   _synchronizing = YES;
   @try {
+  [self synchronizePanes];
   [self reflectNativeGeometry];
   for (NSView *view in _widgets) {
     if(_invalidated) break;
     GtkWidget *widget = [self widgetForView:view];
+    if([_paneScenes objectForKey:view]) continue;
     if ([view isKindOfClass:[NSTableView class]] && [view valueForKey:@"_nativeTableView"]) continue;
     gtk_widget_set_visible(widget, ![view isHidden]);
     gtk_widget_set_tooltip_text(widget, [[view toolTip] UTF8String]);
@@ -1574,7 +1710,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
         GtkWidget *native=[self widgetForView:child]; graphene_rect_t rect;
         if(!native || !gtk_widget_get_mapped(native) || gtk_widget_get_allocated_width(native)<=0
             || gtk_widget_get_allocated_height(native)<=0 || [child isKindOfClass:[NSTableView class]]) continue;
-        [pending addObject:child];
+        if(![_paneScenes objectForKey:child]) [pending addObject:child];
         NSValue *expected=g_object_get_data(G_OBJECT(native),"appkit-reflected-frame");
         if(!expected) expected=g_object_get_data(G_OBJECT(native),"appkit-source-frame");
         if(expected && !NSEqualRects(expected.rectValue,child.frame)) continue;
@@ -1785,7 +1921,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   _invalidated=YES;
   for (NSView *view in _widgets) {
     if (GSNativeViewPeerForView(view)==self) GSSetNativeViewPeer(view,nil);
-    GtkWidget *widget=[self widgetForView:view];
+    GtkWidget *widget=[[_widgets objectForKey:view] pointerValue];
     GtkWidget *scrollWidget=g_object_get_data(G_OBJECT(widget),"appkit-scroll-widget");
     if(scrollWidget) {
       g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scrollWidget)),self);
@@ -1804,11 +1940,12 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   // while the tree is still rooted, before unparenting recursively tears down
   // that solver. Embedded list rows belong to their own bridges and are kept.
   for(NSView *view in _widgets) {
-    GtkWidget *widget=[self widgetForView:view];
+    GtkWidget *widget=[[_widgets objectForKey:view] pointerValue];
     if(GTK_IS_CONSTRAINT_LAYOUT(gtk_widget_get_layout_manager(widget)))
       gtk_widget_set_layout_manager(widget,NULL);
   }
   for (GTK4NativeTable *table in _embeddedTables) [table unembed];
+  for(GTK4NativePane *pane in [_paneScenes objectEnumerator]) [pane->bridge invalidate];
 }
 - (void)dealloc
 {
@@ -1822,6 +1959,6 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     }
     g_object_unref(_widget);
   }
-  [_embeddedTables release]; [_widgets release]; [_view release]; [super dealloc];
+  [_paneScenes release]; [_embeddedTables release]; [_widgets release]; [_view release]; [super dealloc];
 }
 @end
