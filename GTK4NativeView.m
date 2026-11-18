@@ -1,6 +1,7 @@
 #import "GTK4NativeView.h"
 #import "GTK4NativeCustomView.h"
 #import "GTK4NativeClip.h"
+#import "GTK4NativeStepper.h"
 #import "GTK4NativeTable.h"
 #include <objc/runtime.h>
 static char layoutInputKey;
@@ -211,6 +212,9 @@ static BOOL customView(NSView *view)
   Class base = [view isKindOfClass:[NSTabView class]] ? [NSTabView class]
     : [view isKindOfClass:[NSBox class]] ? [NSBox class]
     : [view isKindOfClass:[NSComboBox class]] ? [NSComboBox class]
+    : [view isKindOfClass:[NSStepper class]] ? [NSStepper class]
+    : [view isKindOfClass:[NSSlider class]] ? [NSSlider class]
+    : [view isKindOfClass:[NSProgressIndicator class]] ? [NSProgressIndicator class]
     : [view isKindOfClass:[NSButton class]] ? [NSButton class]
     : [view isKindOfClass:[NSTextField class]] ? [NSTextField class]
     : [view isKindOfClass:[NSImageView class]] ? [NSImageView class]
@@ -228,6 +232,10 @@ static BOOL layoutContainer(NSView *view) { return containerView(view) || custom
 @interface NSPathCell (GTK4NativeScene)
 - (void)_setClickedPathComponentCell:(NSPathComponentCell *)cell;
 @end
+// NSProgressIndicator is a view rather than an NSControl, but its native
+// widget has the same themed minimum-size requirements as other controls.
+static BOOL nativeControlSize(NSView *view)
+{ return [view isKindOfClass:[NSControl class]] || [view isKindOfClass:[NSProgressIndicator class]]; }
 static BOOL drawingLeaf(NSView *view)
 { return [view isKindOfClass:[NSTextView class]] || [view isKindOfClass:[NSTableView class]] || [view isKindOfClass:[NSRulerView class]]; }
 static void splitPositionChanged(GObject *paned,GParamSpec *spec,gpointer bridge)
@@ -238,6 +246,8 @@ static void splitPositionChanged(GObject *paned,GParamSpec *spec,gpointer bridge
 - (void)entryChanged:(GtkWidget *)widget;
 - (void)scrollChanged:(GtkWidget *)widget;
 - (void)activate:(GtkWidget *)widget;
+- (void)sliderChanged:(GtkWidget *)widget;
+- (void)stepperChanged:(GtkWidget *)widget;
 - (void)tabChanged:(GtkWidget *)stack;
 - (void)reflectNativeGeometry;
 @end
@@ -273,6 +283,66 @@ static gboolean deferredEntry(gpointer data)
 }
 static void comboEntryChanged(GtkEditable *editable,gpointer bridge)
 { g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,deferredEntry,g_object_ref(editable),g_object_unref); }
+static void sliderChanged(GtkRange *range,gpointer bridge)
+{ [(GTK4NativeView *)bridge sliderChanged:GTK_WIDGET(range)]; }
+static gboolean sliderRelease(gpointer data)
+{
+  GtkWidget *widget=data;
+  GTK4NativeView *bridge=g_object_get_data(G_OBJECT(widget),"appkit-bridge");
+  g_object_set_data(G_OBJECT(widget),"appkit-dragging",NULL);
+  if (bridge) {
+    NSSlider *slider=g_object_get_data(G_OBJECT(widget),"appkit-view");
+    NSNumber *start=g_object_get_data(G_OBJECT(widget),"appkit-drag-value");
+    if (!slider.isContinuous && start && start.doubleValue!=slider.doubleValue) [bridge activate:widget];
+  }
+  return G_SOURCE_REMOVE;
+}
+static gboolean sliderEvent(GtkEventControllerLegacy *controller,GdkEvent *event,gpointer unused)
+{
+  GtkWidget *widget=gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(controller));
+  GdkEventType type=gdk_event_get_event_type(event);
+  if(type==GDK_BUTTON_PRESS || type==GDK_TOUCH_BEGIN) {
+    g_object_set_data(G_OBJECT(widget),"appkit-dragging",GINT_TO_POINTER(1));
+    g_object_set_data_full(G_OBJECT(widget),"appkit-drag-value",[[NSNumber numberWithDouble:gtk_range_get_value(GTK_RANGE(widget))] retain],releaseObject);
+  } else if(type==GDK_BUTTON_RELEASE || type==GDK_TOUCH_END || type==GDK_TOUCH_CANCEL) {
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,sliderRelease,g_object_ref(widget),g_object_unref);
+  }
+  return FALSE;
+}
+static void stepperChanged(GtkSpinButton *widget,gpointer bridge)
+{ [(GTK4NativeView *)bridge stepperChanged:GTK_WIDGET(widget)]; }
+static gboolean stepperEvent(GtkEventControllerLegacy *controller,GdkEvent *event,gpointer unused)
+{
+  GtkWidget *widget=gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(controller));
+  GdkEventType type=gdk_event_get_event_type(event);
+  if(type==GDK_BUTTON_PRESS || type==GDK_TOUCH_BEGIN) {
+    g_object_set_data(G_OBJECT(widget),"appkit-stepper-held",GINT_TO_POINTER(1));
+    g_object_set_data(G_OBJECT(widget),"appkit-stepper-stepped",NULL);
+  } else if(type==GDK_BUTTON_RELEASE || type==GDK_TOUCH_END || type==GDK_TOUCH_CANCEL) {
+    g_object_set_data(G_OBJECT(widget),"appkit-stepper-held",NULL);
+  }
+  return FALSE;
+}
+static guint decimalDigits(double value)
+{
+  for(guint digits=0;digits<8;digits++,value*=10)
+    if(fabs(value-round(value))<1e-7) return digits;
+  return 8;
+}
+static gboolean progressTick(GtkWidget *widget,GdkFrameClock *clock,gpointer unused)
+{
+  NSProgressIndicator *source=g_object_get_data(G_OBJECT(widget),"appkit-view");
+  if (!g_object_get_data(G_OBJECT(widget),"appkit-bridge")) return G_SOURCE_REMOVE;
+  if (source.isAnimating && source.isIndeterminate && gtk_widget_get_mapped(widget)) {
+    gint64 now=gdk_frame_clock_get_frame_time(clock);
+    NSNumber *last=g_object_get_data(G_OBJECT(widget),"appkit-pulse-time");
+    if (!last || now-last.longLongValue>=MAX(.02,source.animationDelay)*1000000) {
+      gtk_progress_bar_pulse(GTK_PROGRESS_BAR(widget));
+      g_object_set_data_full(G_OBJECT(widget),"appkit-pulse-time",[[NSNumber numberWithLongLong:now] retain],releaseObject);
+    }
+  }
+  return G_SOURCE_CONTINUE;
+}
 static void tabChanged(GObject *stack,GParamSpec *spec,gpointer bridge)
 { [(GTK4NativeView *)bridge tabChanged:GTK_WIDGET(stack)]; }
 static void scrollChanged(GtkAdjustment *adjustment,gpointer bridge)
@@ -492,7 +562,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     return scroll.documentView && [self supportsView:scroll.documentView];
   }
   if([view isKindOfClass:[NSPathControl class]]) return [(NSPathControl *)view pathStyle]==NSPathStyleStandard;
-  BOOL control = [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSImageView class]]
+  BOOL control = [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSSlider class]] || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSImageView class]]
     || [view isKindOfClass:[NSButton class]] || [view isKindOfClass:[NSSwitch class]]
     || [view isKindOfClass:[NSSegmentedControl class]] || [view isKindOfClass:[NSMatrix class]];
   if([view isKindOfClass:[NSBox class]]) {
@@ -520,6 +590,9 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
   Class base = [view isKindOfClass:[NSTabView class]] ? [NSTabView class]
     : [view isKindOfClass:[NSBox class]] ? [NSBox class]
     : [view isKindOfClass:[NSComboBox class]] ? [NSComboBox class]
+    : [view isKindOfClass:[NSStepper class]] ? [NSStepper class]
+    : [view isKindOfClass:[NSSlider class]] ? [NSSlider class]
+    : [view isKindOfClass:[NSProgressIndicator class]] ? [NSProgressIndicator class]
     : [view isKindOfClass:[NSTextField class]] ? [NSTextField class]
     : [view isKindOfClass:[NSImageView class]] ? [NSImageView class]
     : [view isKindOfClass:[NSPopUpButton class]] ? [NSPopUpButton class]
@@ -746,7 +819,37 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     g_signal_connect(entry,"changed",G_CALLBACK(comboEntryChanged),self);
     g_signal_connect(entry,"activate",G_CALLBACK(activated),self);
     g_signal_connect(widget,"changed",G_CALLBACK(activated),self);
-  } else if ([view isKindOfClass:[NSTextField class]]) {
+  } else if ([view isKindOfClass:[NSStepper class]]) {
+    if(![(NSStepper *)view gtk4NativeUsesSpinButton]) {
+      widget=GTK4NativeStepperNew(_scale);
+      g_signal_connect(widget,"value-changed",G_CALLBACK(stepperChanged),self);
+    } else {
+      widget=gtk_spin_button_new_with_range(0,100,1);
+      gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(widget),TRUE);
+      gtk_spin_button_set_update_policy(GTK_SPIN_BUTTON(widget),GTK_UPDATE_IF_VALID);
+      gtk_spin_button_set_climb_rate(GTK_SPIN_BUTTON(widget),0);
+      gtk_editable_set_width_chars(GTK_EDITABLE(widget),4);
+      g_signal_connect(widget,"value-changed",G_CALLBACK(stepperChanged),self);
+      GtkEventController *events=gtk_event_controller_legacy_new();
+      gtk_event_controller_set_propagation_phase(events,GTK_PHASE_CAPTURE);
+      g_signal_connect(events,"event",G_CALLBACK(stepperEvent),NULL);
+      gtk_widget_add_controller(widget,events);
+    }
+  } else if ([view isKindOfClass:[NSSlider class]]) {
+    BOOL vertical=NSHeight(view.bounds)>NSWidth(view.bounds) && [(NSSliderCell *)[(NSSlider *)view cell] sliderType]!=NSCircularSlider;
+    widget=gtk_scale_new_with_range(vertical?GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL,0,1,.01);
+    gtk_scale_set_draw_value(GTK_SCALE(widget),FALSE);
+    gtk_range_set_inverted(GTK_RANGE(widget),vertical);
+    g_signal_connect(widget,"value-changed",G_CALLBACK(sliderChanged),self);
+    GtkEventController *events=gtk_event_controller_legacy_new();
+    gtk_event_controller_set_propagation_phase(events,GTK_PHASE_CAPTURE);
+    g_signal_connect(events,"event",G_CALLBACK(sliderEvent),NULL);
+    gtk_widget_add_controller(widget,events);
+  } else if ([view isKindOfClass:[NSProgressIndicator class]]) {
+    NSProgressIndicator *progress=(id)view;
+    widget=progress.style==NSProgressIndicatorSpinningStyle && progress.isIndeterminate?gtk_spinner_new():gtk_progress_bar_new();
+  }
+  else if ([view isKindOfClass:[NSTextField class]]) {
     NSTextField *field = (id)view;
     widget = [field isEditable] ? gtk_entry_new() : gtk_label_new([[field stringValue] UTF8String]);
     if ([field isEditable]) {
@@ -962,7 +1065,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       GtkOrientation orientation=axis==0?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL;
       NSLayoutConstraintOrientation sourceAxis=axis==0?NSLayoutConstraintOrientationHorizontal:NSLayoutConstraintOrientationVertical;
       // Native minima and initial source preferences become GTK guides.
-      if (![child isKindOfClass:[NSControl class]] && [child contentHuggingPriorityForOrientation:sourceAxis]==250
+      if (!nativeControlSize(child) && [child contentHuggingPriorityForOrientation:sourceAxis]==250
           && [child contentCompressionResistancePriorityForOrientation:sourceAxis]==750) continue;
       int nativeMinimum=0,natural=0; gtk_widget_measure(widget,orientation,-1,&nativeMinimum,&natural,NULL,NULL);
       GtkConstraintAttribute attr=axis==0?GTK_CONSTRAINT_ATTRIBUTE_WIDTH:GTK_CONSTRAINT_ATTRIBUTE_HEIGHT;
@@ -1016,7 +1119,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
         CGFloat total=0; int count=0;
         for(int i=0;i<3;i++) if(flex[axis][i]) { total+=lengths[i]; count++; }
         CGFloat size=sizes[axis];
-        if(!flex[axis][1] && [child isKindOfClass:[NSControl class]]) {
+        if(!flex[axis][1] && nativeControlSize(child)) {
           int minimum=0; gtk_widget_measure(widget,axis==0?GTK_ORIENTATION_HORIZONTAL:GTK_ORIENTATION_VERTICAL,-1,&minimum,NULL,NULL,NULL);
           size=MAX(size,minimum/_scale);
         }
@@ -1043,7 +1146,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     double constant=c.constant*_scale;
     // XIB control slots may be smaller than GTK's theme minimum. Preserve the
     // native control's padding instead of forcing a negative child allocation.
-    if(first && !c.secondItem && [c.firstItem isKindOfClass:[NSControl class]]
+    if(first && !c.secondItem && nativeControlSize(c.firstItem)
         && (firstAttr==GTK_CONSTRAINT_ATTRIBUTE_WIDTH || firstAttr==GTK_CONSTRAINT_ATTRIBUTE_HEIGHT)
         && relation!=GTK_CONSTRAINT_RELATION_LE) {
       int minimum=0;
@@ -1207,6 +1310,59 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       gtk_editable_set_editable(entry,combo.isEditable);
       const char *text=combo.stringValue.UTF8String?:"";
       if(strcmp(gtk_editable_get_text(entry),text)) gtk_editable_set_text(entry,text);
+    } else if ([view isKindOfClass:[NSStepper class]]) {
+      NSStepper *stepper=(id)view;
+      double lower=stepper.minValue,upper=MAX(lower,stepper.maxValue);
+      if(GTK4NativeIsStepper(widget)) {
+        GTK4NativeStepperConfigure(widget,lower,upper,stepper.increment,stepper.doubleValue,stepper.valueWraps,stepper.autorepeat);
+        controlSensitive(widget,stepper.isEnabled && upper>lower && stepper.increment!=0);
+        continue;
+      }
+      double increment=fabs(stepper.increment);
+      if(!(increment>0)) increment=1;
+      guint digits=MAX(decimalDigits(increment),MAX(decimalDigits(lower),decimalDigits(stepper.doubleValue)));
+      gtk_spin_button_set_digits(GTK_SPIN_BUTTON(widget),digits);
+      gtk_adjustment_configure(gtk_spin_button_get_adjustment(GTK_SPIN_BUTTON(widget)),
+        stepper.doubleValue,lower,upper,increment,increment*10,0);
+      gtk_spin_button_set_wrap(GTK_SPIN_BUTTON(widget),stepper.valueWraps);
+      controlSensitive(widget,stepper.isEnabled && upper>lower);
+    } else if ([view isKindOfClass:[NSSlider class]]) {
+      NSSlider *slider=(id)view;
+      double lower=slider.minValue, upper=slider.maxValue, range=MAX(0,upper-lower);
+      gtk_range_set_range(GTK_RANGE(widget),lower,range>0?upper:lower+1);
+      gtk_range_set_increments(GTK_RANGE(widget),range>0?range/100:1,range>0?range/10:1);
+      gtk_widget_set_sensitive(widget,slider.isEnabled && range>0);
+      gtk_range_set_value(GTK_RANGE(widget),slider.doubleValue);
+      NSArray *marks=@[@(slider.numberOfTickMarks),@(slider.tickMarkPosition),@(lower),@(upper)];
+      if(![marks isEqual:(id)g_object_get_data(G_OBJECT(widget),"appkit-slider-marks")]) {
+        gtk_scale_clear_marks(GTK_SCALE(widget));
+        BOOL vertical=gtk_orientable_get_orientation(GTK_ORIENTABLE(widget))==GTK_ORIENTATION_VERTICAL;
+        GtkPositionType position=vertical?(slider.tickMarkPosition==NSTickMarkLeft?GTK_POS_LEFT:GTK_POS_RIGHT)
+          :(slider.tickMarkPosition==NSTickMarkAbove?GTK_POS_TOP:GTK_POS_BOTTOM);
+        for(NSInteger i=0;i<slider.numberOfTickMarks;i++) gtk_scale_add_mark(GTK_SCALE(widget),[slider tickMarkValueAtIndex:i],position,NULL);
+        g_object_set_data_full(G_OBJECT(widget),"appkit-slider-marks",[marks copy],releaseObject);
+      }
+    } else if ([view isKindOfClass:[NSProgressIndicator class]]) {
+      NSProgressIndicator *progress=(id)view;
+      if(GTK_IS_SPINNER(widget)) gtk_spinner_set_spinning(GTK_SPINNER(widget),progress.isAnimating);
+      else {
+        guint tick=GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(widget),"appkit-progress-tick"));
+        if(progress.isIndeterminate && progress.isAnimating && !tick) {
+          gtk_progress_bar_pulse(GTK_PROGRESS_BAR(widget));
+          tick=gtk_widget_add_tick_callback(widget,progressTick,NULL,NULL);
+          g_object_set_data(G_OBJECT(widget),"appkit-progress-tick",GUINT_TO_POINTER(tick));
+        } else if((!progress.isIndeterminate || !progress.isAnimating) && tick) {
+          gtk_widget_remove_tick_callback(widget,tick);
+          g_object_set_data(G_OBJECT(widget),"appkit-progress-tick",NULL);
+          g_object_set_data(G_OBJECT(widget),"appkit-pulse-time",NULL);
+        }
+        gtk_orientable_set_orientation(GTK_ORIENTABLE(widget),progress.isVertical?GTK_ORIENTATION_VERTICAL:GTK_ORIENTATION_HORIZONTAL);
+        gtk_progress_bar_set_inverted(GTK_PROGRESS_BAR(widget),progress.isVertical);
+        if(!progress.isIndeterminate || !progress.isAnimating) {
+          double range=progress.maxValue-progress.minValue;
+          gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(widget),range>0?CLAMP((progress.doubleValue-progress.minValue)/range,0,1):0);
+        }
+      }
     } else if ([view isKindOfClass:[NSTextField class]]) {
       const char *text = [[(NSTextField *)view stringValue] UTF8String] ?: "";
       if (GTK_IS_EDITABLE(widget)) {
@@ -1419,6 +1575,43 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     }
   } @finally { _reflecting=NO; }
 }
+- (void)stepperChanged:(GtkWidget *)widget
+{
+  if (_synchronizing || _invalidated || !gtk_widget_is_sensitive(widget)) return;
+  [self retain];
+  @try {
+    NSStepper *stepper=g_object_get_data(G_OBJECT(widget),"appkit-view");
+    BOOL compact=GTK4NativeIsStepper(widget);
+    BOOL held=!compact && g_object_get_data(G_OBJECT(widget),"appkit-stepper-held")!=NULL;
+    if(held && !stepper.autorepeat && g_object_get_data(G_OBJECT(widget),"appkit-stepper-stepped")) {
+      _synchronizing=YES;
+      gtk_spin_button_set_value(GTK_SPIN_BUTTON(widget),stepper.doubleValue);
+      _synchronizing=NO;
+      return;
+    }
+    double value=compact?GTK4NativeStepperGetValue(widget):gtk_spin_button_get_value(GTK_SPIN_BUTTON(widget));
+    if(value==stepper.doubleValue) return;
+    _synchronizing=YES;
+    [stepper setDoubleValue:value];
+    _synchronizing=NO;
+    if(held) g_object_set_data(G_OBJECT(widget),"appkit-stepper-stepped",GINT_TO_POINTER(1));
+    [self activate:widget];
+  } @finally { _synchronizing=NO; [self release]; }
+}
+- (void)sliderChanged:(GtkWidget *)widget
+{
+  if (_synchronizing || _invalidated) return;
+  [self retain];
+  NSSlider *slider=g_object_get_data(G_OBJECT(widget),"appkit-view");
+  double value=gtk_range_get_value(GTK_RANGE(widget));
+  if(slider.allowsTickMarkValuesOnly && slider.numberOfTickMarks) value=[slider closestTickMarkValueToValue:value];
+  _synchronizing=YES;
+  [slider setDoubleValue:value];
+  gtk_range_set_value(GTK_RANGE(widget),value);
+  _synchronizing=NO;
+  if(slider.isContinuous || !g_object_get_data(G_OBJECT(widget),"appkit-dragging")) [self activate:widget];
+  [self release];
+}
 - (void)entryChanged:(GtkWidget *)widget
 {
   if (_synchronizing || _invalidated) return;
@@ -1562,6 +1755,11 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     gtk_widget_queue_allocate(widget);
   }
 }
+- (BOOL)ownsAnimationForNativeView:(NSView *)view
+{
+  GtkWidget *widget=[self widgetForView:view];
+  return !_invalidated && widget && (GTK_IS_SPINNER(widget) || GTK_IS_PROGRESS_BAR(widget));
+}
 - (BOOL)focusNativeView:(NSView *)view
 {
   GtkWidget *widget=[self widgetForView:view];
@@ -1579,6 +1777,8 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scrollWidget)),self);
       g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrollWidget)),self);
     }
+    guint tick=GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(widget),"appkit-progress-tick"));
+    if(tick) { gtk_widget_remove_tick_callback(widget,tick); g_object_set_data(G_OBJECT(widget),"appkit-progress-tick",NULL); }
     g_object_set_data(G_OBJECT(widget),"appkit-bridge",NULL);
     if(GTK_IS_SCROLLED_WINDOW(widget)) {
       g_signal_handlers_disconnect_by_data(gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget)),self);

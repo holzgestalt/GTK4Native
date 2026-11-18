@@ -118,12 +118,15 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Checkboxes/radio matrices | Live GtkCheckButton indicators, off/on/mixed checkbox states, grouped NSMatrix radios, native input and original target/action senders | Non-radio matrices and custom cells |
 | Switches/segments | Live GtkSwitch and linked native segment buttons; select-one, select-any, momentary and disabled segments | Segment popup menus and additional segment-style mappings |
 | Combo boxes | Live editable GtkComboBoxText, native chevron/popup, items/data source, original sender/action | Custom/formatter-based text fields retain AppKit editing |
+| Sliders | Live GtkScale, vertical/horizontal, ticks and snapping, continuous/release actions | Circular source sliders use GTK’s linear scale |
+| Progress | Live GtkProgressBar and GtkSpinner; GTK frame-clock animation replaces AppKit timers/threads | Determinate spinning sources use a linear GTK progress bar |
+| Steppers | Compact custom GTK widget by default: stacked arrows, existing NSStepper frames, GTK theme drawing/input/focus/repeat, range/wrapping and bindings | Full GtkSpinButton with numeric editor requires explicit opt-in and an adjusted layout |
 | Menus and choices | Live GtkDropDown for flat text NSPopUpButton selection menus, with selection bindings and item updates; real GTK dropdown/context/positioned menus on X11 | Pull-down/complex NSPopUpButton surfaces, native menubar hosting, Wayland attachment |
-| Combo boxes, tooltips | AppKit fallback | GTK rendering or actual GTK popup surfaces |
-| Scrollers | Whole GtkScrollbar snapshots, GTK thickness and thumb geometry, disabled/pressed states, GTK trough-click preference | Native GTK input/accessibility hosting, hover, overlay fading |
+| Tooltips | Native GTK tooltips on hosted controls | Unmatched AppKit content retains its tooltip path |
+| Scrollers | Live GtkScrolledWindow owns frames, scrollbars, input, accessibility and overlay behavior | Unmatched specialized document adapters |
 | Tables | Native GTK list/scroll widgets for supported one-column view-based tables and outlines, with translated compound row controls | Multicolumn/header tables and dedicated framework view adapters |
 | Tabs | Live GtkStack with GtkStackSwitcher/GtkStackSidebar, persistent page peers and AppKit delegate/focus handling | Unsupported specialized page content retains fallback |
-| Boxes | Live GtkFrame groups with titles/content margins and GtkSeparator | Custom colors/borders, borderless and bottom-title boxes retain fallback |
+| Boxes | Live GtkFrame/GtkBox groups with titles/content margins and GtkSeparator | Explicit source fill/stroke styling is not translated; bottom-title boxes retain fallback |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
 Hosted button/selection controls use GTK rendering, input, focus, and accessibility;
@@ -809,6 +812,19 @@ Xvfb. Without it, a bare X server's fallback list masks the failure. The test
 checks document isolation, close notifications, surviving mapped GTK hosts,
 edited-document Discard, and actual last-window termination.
 
+Structural control changes preserve their surrounding GTK scroll and clip
+containers, including when a pressed control is removed before release.
+
+Native combo/slider/progress regression checks: `bash scripts/test-values.sh`
+(from this directory). They cover light, dark, 2× and fractional scales.
+
+`NSStepper` defaults to a compact editor-free GTK widget and keeps its original
+AppKit frame, including when placed next to a separate text field. No UI/XIB
+layout change is needed. The provider can opt into
+a wider GtkSpinButton presentation through `GTK4NativeStepper.h`; that internal
+choice includes a numeric editor and requires a wider layout. Applications and
+XIBs continue to use standard AppKit APIs without GTK-specific properties.
+
 NSTabView uses GtkStack with GtkStackSwitcher (top/bottom) or GtkStackSidebar
 (left/right). No-tab styles hide navigation. All page peers remain alive across
 selection changes; native changes go through AppKit's should/will/did-select
@@ -817,7 +833,8 @@ structure; label and selection changes synchronize in place.
 
 Standard NSBox groups use GtkFrame, including live titles, content margins,
 nested native controls and content-view replacement. Separators use
-GtkSeparator. Custom-color/border boxes, borderless or bottom-title boxes, and
+GtkSeparator. Explicit source fill/stroke styling is not translated: GTK supplies box
+backgrounds and borders. Borderless groups use GtkBox. Bottom-title boxes and
 containers with unsupported specialized content retain their fallback adapter.
 Run `bash scripts/test-containers.sh` for native input, delegate, layout,
 scrolling and teardown checks at light/dark, 2× and fractional scales.

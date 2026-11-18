@@ -1,4 +1,5 @@
 #import "GTK4NativeControls.h"
+#import "GTK4NativeStepper.h"
 #import "GTK4NativeWindow.h"
 #import "GTK4NativeClip.h"
 #import "GTK4NativeCustomView.h"
@@ -146,8 +147,8 @@ static void documentStructure(NSView *view,NSMutableArray *signature) { document
 
 static BOOL buttonControl(NSView *view)
 {
-  return [view isKindOfClass:[NSPathControl class]] || [view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSComboBox class]]
-    || [view isKindOfClass:[NSButton class]]
+  return [view isKindOfClass:[NSPathControl class]] || [view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSComboBox class]] || [view isKindOfClass:[NSSlider class]]
+    || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSButton class]]
     || [view isKindOfClass:[NSSwitch class]] || [view isKindOfClass:[NSSegmentedControl class]]
     || [view isKindOfClass:[NSMatrix class]];
 }
@@ -161,6 +162,9 @@ static NSArray *structure(NSView *view)
     return items;
   }
   if([view isKindOfClass:[NSBox class]]) return @[@([(NSBox *)view boxType]),@([(NSBox *)view borderType])];
+  if ([view isKindOfClass:[NSStepper class]]) return @[@([(NSStepper *)view gtk4NativeUsesSpinButton])];
+  if ([view isKindOfClass:[NSProgressIndicator class]])
+    return @[@([(NSProgressIndicator *)view style]==NSProgressIndicatorSpinningStyle && [(NSProgressIndicator *)view isIndeterminate])];
   if ([view isKindOfClass:[NSMatrix class]]) {
     NSMatrix *m = (id)view;
     // Cell identity matters: replacing a matrix cell invalidates GTK callbacks.
@@ -283,7 +287,23 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
         [next addObject:@[@(scroll.hasVerticalScroller), @(scroll.hasHorizontalScroller), @(scroll.borderType)]];
         GTK4ScrollPeer *peer = [_scrollPeers objectForKey:identity];
         if (peer && (fabs(peer->scale-factor) > .001 || ![peer->signature isEqual:next])) {
-          [peer invalidate]; [_scrollPeers removeObjectForKey:identity]; peer = nil;
+          // Keep the scroll/clip ancestry rooted when rebuilding document
+          // controls, including when a pressed control is removed. GTK keeps
+          // its implicit grab on this ancestry until the physical release.
+          [peer->bridge invalidate];
+          gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->scroller),NULL);
+          [peer->bridge release];
+          peer->bridge=[[GTK4NativeView alloc] initWithView:document scale:factor];
+          if(!peer->bridge) {
+            [peer invalidate]; [_scrollPeers removeObjectForKey:identity]; continue;
+          }
+          peer->scale=factor; ASSIGNCOPY(peer->signature,next);
+          gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(peer->scroller),
+            scroll.hasHorizontalScroller?GTK_POLICY_AUTOMATIC:GTK_POLICY_NEVER,
+            scroll.hasVerticalScroller?GTK_POLICY_AUTOMATIC:GTK_POLICY_NEVER);
+          gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(peer->scroller),scroll.borderType!=NSNoBorder);
+          gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->scroller),peer->bridge.widget);
+          peer->initialized=NO;
         }
         if (!peer) {
           peer = [GTK4ScrollPeer new]; peer->source = [scroll retain]; peer->scale = factor;
@@ -348,7 +368,15 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
     NSMutableArray *nextSignature=[NSMutableArray array];
     documentStructure(view,nextSignature);
     if (peer && (fabs(peer->scale-factor) > .001 || ![peer->signature isEqual:nextSignature])) {
-      [peer invalidate]; [_peers removeObjectForKey:identity]; peer = nil;
+      [peer->bridge invalidate];
+      GTK4NativeClipSetChild(peer->clip,NULL);
+      [peer->bridge release];
+      peer->bridge=[[GTK4NativeView alloc] initWithView:view scale:factor];
+      if(!peer->bridge) {
+        [peer invalidate]; [_peers removeObjectForKey:identity]; continue;
+      }
+      peer->scale=factor; ASSIGNCOPY(peer->signature,nextSignature);
+      GTK4NativeClipSetChild(peer->clip,peer->bridge.widget);
     }
     if (!peer) {
       peer = [[GTK4ControlPeer alloc] init];
