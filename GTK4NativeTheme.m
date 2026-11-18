@@ -116,6 +116,17 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 }
 
 @implementation GTK4NativeTheme
+// GTK marks default actions with its native suggested-action style. The
+// inherited GNUstep return-arrow bitmap is not part of the button content.
+- (void)setKeyEquivalent:(NSString *)key forButtonCell:(NSButtonCell *)cell
+{
+  if ([cell image] == [NSImage imageNamed:@"common_ret"]
+      || [cell image] == [NSImage imageNamed:@"common_retH"]) {
+    [cell setImage:nil];
+    if ([cell alternateImage] == [NSImage imageNamed:@"common_retH"]) [cell setAlternateImage:nil];
+  }
+}
+
 - (id<GSWindowDecorator>)windowDecorator
 {
   if (_available && GTK4NativeWindowsAvailable()) return (id)[GTK4NativeWindowDecorationView class];

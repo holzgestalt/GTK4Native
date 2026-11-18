@@ -121,7 +121,7 @@ int main(void)
   NSTextView *fallback=[[[NSTextView alloc] initWithFrame:NSZeroRect] autorelease];
   [page addSubview:fallback];
   NSButton *push=makeButton(page,actions,@"Push",NSMakeRect(20,20,140,34));
-  NSButton *def=makeButton(page,actions,@"Default",NSMakeRect(180,20,140,34)); [def setKeyEquivalent:@"\r"];
+  NSButton *def=makeButton(page,actions,@"Default",NSMakeRect(180,20,140,34)); [def setKeyEquivalent:@"\r"]; CHECK(!def.image && !def.alternateImage,@"native default button has no Return image");
   NSButton *disabled=makeButton(page,actions,@"Disabled",NSMakeRect(340,20,140,34)); [disabled setEnabled:NO];
   NSButton *toggle=makeButton(page,actions,@"Toggle",NSMakeRect(500,20,140,34)); [toggle setButtonType:NSPushOnPushOffButton];
   NSButton *image=makeButton(page,actions,@"Image + title",NSMakeRect(660,20,280,34));
