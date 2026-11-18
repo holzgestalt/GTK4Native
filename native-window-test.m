@@ -177,6 +177,18 @@ int main(void)
   }
   assertApplicationProperty(display, view->_child, view->_parent, "WM_CLASS");
   assert(gtk_widget_get_height(view->_header) > 0);
+  NSMutableString *subtitle = [NSMutableString stringWithString:@"5 infos"];
+  [window setSubtitle:subtitle]; [subtitle appendString:@" changed"];
+  pump(.1);
+  assert([[window subtitle] isEqual:@"5 infos"]);
+  assert(titleLabel(view->_header,"5 infos"));
+  assert(titleLabel(view->_header,"Native GTK window test"));
+  [window setTitle:@"Renamed document"]; pump(.1);
+  assert(titleLabel(view->_header,"Renamed document") && titleLabel(view->_header,"5 infos"));
+  [window setSubtitle:@"2/5 infos"]; pump(.1);
+  assert(titleLabel(view->_header,"2/5 infos"));
+  [window setSubtitle:nil]; [window setTitle:@"Native GTK window test"]; pump(.1);
+  assert([[window subtitle] isEqual:@""] && titleLabel(view->_header,"Native GTK window test"));
   const char *preview = g_getenv("NATIVE_WINDOW_PREVIEW");
   if (preview) {
     XWindowAttributes attr;

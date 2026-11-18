@@ -675,8 +675,22 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   if (_host) {
     NSString *nativeTitle = documentEdited ? [title stringByAppendingString:@" •"] : title;
     gtk_window_set_title(GTK_WINDOW(_host), [nativeTitle UTF8String]);
+    [self setSubtitle:[window subtitle]];
     if (_nativeToolbar) gtk_widget_set_tooltip_text(_nativeToolbar, [nativeTitle UTF8String]);
   }
+}
+- (void)setSubtitle:(NSString *)subtitle
+{
+  if (![subtitle length]) { gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header),NULL); return; }
+  GtkWidget *box=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
+  GtkWidget *title=gtk_label_new(gtk_window_get_title(GTK_WINDOW(_host)));
+  gtk_widget_add_css_class(title,"title");
+  gtk_label_set_ellipsize(GTK_LABEL(title),PANGO_ELLIPSIZE_END);
+  GtkWidget *detail=gtk_label_new([subtitle UTF8String]);
+  gtk_widget_add_css_class(detail,"subtitle");
+  gtk_label_set_ellipsize(GTK_LABEL(detail),PANGO_ELLIPSIZE_END);
+  gtk_box_append(GTK_BOX(box),title); gtk_box_append(GTK_BOX(box),detail);
+  gtk_header_bar_set_title_widget(GTK_HEADER_BAR(_header),box);
 }
 - (void)setDocumentEdited:(BOOL)edited
 {
@@ -684,6 +698,7 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   NSString *title = [window title];
   if (edited) title = [title stringByAppendingString:@" •"];
   gtk_window_set_title(GTK_WINDOW(_host), [title UTF8String]);
+  [self setSubtitle:[window subtitle]];
 }
 - (void)setWindowNumber:(int)number
 {
