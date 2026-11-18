@@ -125,7 +125,7 @@ static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer)
 static BOOL buttonControl(NSView *view)
 {
   return [view isKindOfClass:[NSPathControl class]] || [view isKindOfClass:[NSSplitView class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSComboBox class]] || [view isKindOfClass:[NSSlider class]]
-    || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSButton class]]
+    || [view isKindOfClass:[NSColorWell class]] || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSButton class]]
     || [view isKindOfClass:[NSSwitch class]] || [view isKindOfClass:[NSSegmentedControl class]]
     || [view isKindOfClass:[NSMatrix class]];
 }

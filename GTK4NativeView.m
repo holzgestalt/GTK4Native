@@ -526,6 +526,27 @@ static void dropdownChanged(GObject *widget, GParamSpec *spec, gpointer bridge)
 {
   [(GTK4NativeView *)bridge activate:GTK_WIDGET(widget)];
 }
+static GdkRGBA nativeColorWellRGBA(GtkWidget *widget)
+{
+#if GTK_CHECK_VERSION(4,10,0)
+  return *gtk_color_dialog_button_get_rgba(GTK_COLOR_DIALOG_BUTTON(widget));
+#else
+  GdkRGBA color; gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(widget),&color); return color;
+#endif
+}
+static void synchronizeColorWell(GtkWidget *widget,NSColorWell *well)
+{
+  NSColor *color=[well.color colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+  GdkRGBA rgba={0,0,0,0};
+  if(color) rgba=(GdkRGBA){color.redComponent,color.greenComponent,color.blueComponent,color.alphaComponent};
+  GdkRGBA current=nativeColorWellRGBA(widget);
+  if(gdk_rgba_equal(&current,&rgba)) return;
+#if GTK_CHECK_VERSION(4,10,0)
+  gtk_color_dialog_button_set_rgba(GTK_COLOR_DIALOG_BUTTON(widget),&rgba);
+#else
+  gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(widget),&rgba);
+#endif
+}
 static void popupItemSetup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer unused)
 {
   GtkWidget *label = gtk_label_new("");
@@ -650,7 +671,7 @@ static NSArray *structure(NSView *view)
     return scroll.documentView && [self supportsView:scroll.documentView];
   }
   if([view isKindOfClass:[NSPathControl class]]) return [(NSPathControl *)view pathStyle]==NSPathStyleStandard;
-  BOOL control = [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSSlider class]] || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSImageView class]]
+  BOOL control = [view isKindOfClass:[NSColorWell class]] || [view isKindOfClass:[NSTabView class]] || [view isKindOfClass:[NSBox class]] || [view isKindOfClass:[NSStepper class]] || [view isKindOfClass:[NSSlider class]] || [view isKindOfClass:[NSProgressIndicator class]] || [view isKindOfClass:[NSTextField class]] || [view isKindOfClass:[NSImageView class]]
     || [view isKindOfClass:[NSButton class]] || [view isKindOfClass:[NSSwitch class]]
     || [view isKindOfClass:[NSSegmentedControl class]] || [view isKindOfClass:[NSMatrix class]];
   if([view isKindOfClass:[NSBox class]]) {
@@ -675,7 +696,8 @@ static NSArray *structure(NSView *view)
     for (NSCell *cell in [(NSMatrix *)view cells])
       if (![cell isKindOfClass:[NSButtonCell class]] || !radioCell((id)cell)) return NO;
   }
-  Class base = [view isKindOfClass:[NSTabView class]] ? [NSTabView class]
+  Class base = [view isKindOfClass:[NSColorWell class]] ? [NSColorWell class]
+    : [view isKindOfClass:[NSTabView class]] ? [NSTabView class]
     : [view isKindOfClass:[NSBox class]] ? [NSBox class]
     : [view isKindOfClass:[NSComboBox class]] ? [NSComboBox class]
     : [view isKindOfClass:[NSStepper class]] ? [NSStepper class]
@@ -843,7 +865,7 @@ static NSArray *structure(NSView *view)
   }
   else if ([view isKindOfClass:[NSScrollView class]]) {
     NSScrollView *scroll=(id)view;
-    GTK4NativeTable *table=[scroll.documentView isKindOfClass:[NSTableView class]]?[(NSTableView *)scroll.documentView _nativeTableView]:nil;
+    GTK4NativeTable *table=[scroll.documentView isKindOfClass:[NSTableView class]]?[GTK4NativeTable attachedPeerForTable:(NSTableView *)scroll.documentView]:nil;
     if (table) {
       widget=[table embed];
       [_embeddedTables addObject:table];
@@ -985,6 +1007,17 @@ static NSArray *structure(NSView *view)
     gtk_event_controller_set_propagation_phase(events,GTK_PHASE_CAPTURE);
     g_signal_connect(events,"event",G_CALLBACK(sliderEvent),NULL);
     gtk_widget_add_controller(widget,events);
+  } else if ([view isKindOfClass:[NSColorWell class]]) {
+#if GTK_CHECK_VERSION(4,10,0)
+    GtkColorDialog *dialog=gtk_color_dialog_new();
+    gtk_color_dialog_set_with_alpha(dialog,TRUE);
+    widget=gtk_color_dialog_button_new(dialog); // Consumes the dialog reference.
+    g_signal_connect(widget,"notify::rgba",G_CALLBACK(dropdownChanged),self);
+#else
+    widget=gtk_color_button_new();
+    gtk_color_chooser_set_use_alpha(GTK_COLOR_CHOOSER(widget),TRUE);
+    g_signal_connect(widget,"color-set",G_CALLBACK(activated),self);
+#endif
   } else if ([view isKindOfClass:[NSProgressIndicator class]]) {
     NSProgressIndicator *progress=(id)view;
     widget=progress.style==NSProgressIndicatorSpinningStyle && progress.isIndeterminate?gtk_spinner_new():gtk_progress_bar_new();
@@ -1484,6 +1517,8 @@ static NSArray *structure(NSView *view)
         for(NSInteger i=0;i<slider.numberOfTickMarks;i++) gtk_scale_add_mark(GTK_SCALE(widget),[slider tickMarkValueAtIndex:i],position,NULL);
         g_object_set_data_full(G_OBJECT(widget),"appkit-slider-marks",[marks copy],releaseObject);
       }
+    } else if ([view isKindOfClass:[NSColorWell class]]) {
+      synchronizeColorWell(widget,(NSColorWell *)view);
     } else if ([view isKindOfClass:[NSProgressIndicator class]]) {
       NSProgressIndicator *progress=(id)view;
       if(GTK_IS_SPINNER(widget)) gtk_spinner_set_spinning(GTK_SPINNER(widget),progress.isAnimating);
@@ -1833,7 +1868,10 @@ static NSArray *structure(NSView *view)
       [self synchronize];
       return;
     }
-    if ([control isKindOfClass:[NSMatrix class]]) {
+    if ([control isKindOfClass:[NSColorWell class]]) {
+      GdkRGBA rgba=nativeColorWellRGBA(widget);
+      [(NSColorWell *)control setColor:[NSColor colorWithCalibratedRed:rgba.red green:rgba.green blue:rgba.blue alpha:rgba.alpha]];
+    } else if ([control isKindOfClass:[NSMatrix class]]) {
       if (!gtk_check_button_get_active(GTK_CHECK_BUTTON(widget))) return;
       NSCell *cell = g_object_get_data(G_OBJECT(widget), "appkit-cell");
       [(NSMatrix *)control selectCell:cell];

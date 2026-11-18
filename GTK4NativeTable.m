@@ -26,10 +26,21 @@
   BOOL _bound;
   gint64 _bindFrame;
   GObject *_representedItem;
+  NSTableColumn *_column;
+  GtkWidget *_label;
 }
 @end
 @implementation GTK4NativeRow
-- (void)dealloc { if(_representedItem) g_object_unref(_representedItem); [_bridge release]; [super dealloc]; }
+- (void)dealloc { [_column release]; if(_representedItem) g_object_unref(_representedItem); [_bridge release]; [super dealloc]; }
+@end
+@interface GTK4NativeColumn : NSObject {
+@public
+  GTK4NativeTable *_peer;
+  NSTableColumn *_column;
+}
+@end
+@implementation GTK4NativeColumn
+- (void)dealloc { [_column release]; [super dealloc]; }
 @end
 static void releaseRow(gpointer data) { [(id)data release]; }
 static void groupToggled(GtkButton *button, gpointer data)
@@ -67,9 +78,22 @@ static void setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer
   g_object_set_data_full(G_OBJECT(item), "appkit-row", row, releaseRow);
   [((GTK4NativeTable *)data)->_rows addObject:row];
 }
+static void setupColumn(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
+{
+  GTK4NativeColumn *column = data;
+  setup(factory,item,column->_peer);
+  GTK4NativeRow *row = g_object_get_data(G_OBJECT(item),"appkit-row");
+  row->_column = [column->_column retain];
+  row->_label = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(row->_label),0);
+  gtk_label_set_ellipsize(GTK_LABEL(row->_label),PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand(row->_label,TRUE);
+  gtk_box_append(GTK_BOX(row->_box),row->_label);
+}
 static void updateOutlineRow(GTK4NativeTable *peer,GTK4NativeRow *row)
 {
-  if(![peer->_table isKindOfClass:NSOutlineView.class]) return;
+  if(![peer->_table isKindOfClass:NSOutlineView.class]
+      || (row->_column && row->_column != [(NSOutlineView *)peer->_table outlineTableColumn])) return;
   NSUInteger index=gtk_list_item_get_position(row->_item);
   if(index>=[peer->_table numberOfRows]) return;
   NSOutlineView *outline=(id)peer->_table;
@@ -92,6 +116,26 @@ static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
   NSUInteger index = gtk_list_item_get_position(item);
   if (index >= [peer->_table numberOfRows]) return;
   row->_pending = NO;
+  if (row->_column) {
+    id value = [peer->_table _objectValueForTableColumn:row->_column row:index];
+    // Cocoa view-based lists bind their prototype to a content-array object.
+    NSDictionary *binding = [peer->_table infoForBinding:NSContentBinding];
+    if (!value && binding) {
+      NSArray *content = [binding[NSObservedObjectKey] valueForKeyPath:binding[NSObservedKeyPathKey]];
+      if (index < content.count) value = content[index];
+    }
+    NSView *prototype = [peer->_table _prototypeCellViewFromTableColumn:row->_column];
+    if ([prototype isKindOfClass:NSTableCellView.class]) {
+      [(NSTableCellView *)prototype setObjectValue:value];
+      value = [[(NSTableCellView *)prototype textField] stringValue];
+    }
+    NSString *text = [value isKindOfClass:NSAttributedString.class] ? [value string] : [value description];
+    gtk_label_set_text(GTK_LABEL(row->_label),[text UTF8String] ?: "");
+    row->_generation = peer->_generation;
+    g_set_object(&row->_representedItem,gtk_list_item_get_item(item));
+    updateOutlineRow(peer,row);
+    return;
+  }
   NSTableRowView *background = [peer->_table _delegateRowViewForRow:index];
   if (background && [background class] != [NSTableRowView class]) {
     peer->_failed = YES; [peer->_table setNeedsDisplay:YES]; return;
@@ -139,6 +183,8 @@ static void bindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpoint
   gtk_widget_set_size_request(row->_box,-1, position < [peer->_table numberOfRows]
     ? MAX(1,ceil([peer->_table _rowHeightForRow:position] * peer->_scale)) : 1);
 }
+static void bindColumn(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
+{ bindRow(factory,item,((GTK4NativeColumn *)data)->_peer); }
 static void unbindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
 {
   GTK4NativeRow *row = g_object_get_data(G_OBJECT(item),"appkit-row");
@@ -181,19 +227,38 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   if (peer->_table) [NSApp sendAction:[peer->_table doubleAction] to:[peer->_table target] from:peer->_table];
 }
 
+static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
+{ teardownRow(factory,item,((GTK4NativeColumn *)data)->_peer); }
+
 @implementation GTK4NativeTable
++ (id)attachedPeerForTable:(NSTableView *)table
+{
+  id peer = [table valueForKey:@"_nativeTableView"];
+  if (!peer) {
+    peer = [self peerForTable:table];
+    if (peer) [table setValue:peer forKey:@"_nativeTableView"];
+  }
+  return peer;
+}
 + (id)peerForTable:(NSTableView *)table
 {
-  if (g_strcmp0(g_getenv("GTK4_NATIVE_TABLES"), "0") == 0 || [table numberOfColumns] != 1
-      || [table headerView] != nil || ![table enclosingScrollView]) return nil;
+  if (g_strcmp0(g_getenv("GTK4_NATIVE_TABLES"), "0") == 0 || ![table numberOfColumns]
+      || ![table enclosingScrollView]) return nil;
   NSView *decoration = [table window].contentView;
   while ([decoration superview]) decoration = [decoration superview];
   if (![decoration isKindOfClass:[GTK4NativeWindowDecorationView class]]) return nil;
   GTK4NativeWindowDecorationView *host = (id)decoration;
   if (!host->_host || !host->_nativeContent) return nil;
   NSDictionary *prototypes = [table valueForKey:@"_registeredViews"];
-  if (![prototypes count]) return nil;
-  for (NSView *view in [prototypes allValues]) if (![GTK4NativeView supportsView:view]) return nil;
+  BOOL columnView = [table headerView] != nil || table.numberOfColumns != 1 || !prototypes.count;
+  if (columnView) {
+    for (NSTableColumn *column in table.tableColumns) if ([column isEditable]) return nil;
+    for (NSView *view in prototypes.allValues) {
+      if (![view isKindOfClass:NSTableCellView.class] || view.subviews.count != 1
+          || view.subviews.firstObject != [(NSTableCellView *)view textField]) return nil;
+    }
+  }
+  if (!columnView) for (NSView *view in [prototypes allValues]) if (![GTK4NativeView supportsView:view]) return nil;
   GTK4NativeTable *peer = [[[self alloc] init] autorelease];
   peer->_table = table; peer->_host = host;
   peer->_scale = [[table window] userSpaceScaleFactor] / MAX(1, gtk_widget_get_scale_factor(host->_host));
@@ -206,12 +271,38 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
     gtk_single_selection_set_autoselect(GTK_SINGLE_SELECTION(peer->_selection), FALSE);
     gtk_single_selection_set_can_unselect(GTK_SINGLE_SELECTION(peer->_selection), [table allowsEmptySelection]);
   }
+  if (columnView) {
+    peer->_list = gtk_column_view_new(GTK_SELECTION_MODEL(g_object_ref(peer->_selection)));
+    gtk_column_view_set_show_column_separators(GTK_COLUMN_VIEW(peer->_list),TRUE);
+    for (NSTableColumn *column in table.tableColumns) {
+      GTK4NativeColumn *context = [GTK4NativeColumn new];
+      context->_peer = peer; context->_column = [column retain];
+      GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
+      g_object_set_data_full(G_OBJECT(factory),"appkit-column-context",context,releaseRow);
+      g_signal_connect(factory,"setup",G_CALLBACK(setupColumn),context);
+      g_signal_connect(factory,"bind",G_CALLBACK(bindColumn),context);
+      g_signal_connect(factory,"unbind",G_CALLBACK(unbindRow),context);
+      g_signal_connect(factory,"teardown",G_CALLBACK(teardownColumn),context);
+      GtkColumnViewColumn *native = gtk_column_view_column_new([[column.headerCell stringValue] UTF8String],factory);
+      g_object_set_data(G_OBJECT(native),"appkit-column",column);
+      // A single-column list fills its viewport in both directions. An initial
+      // AppKit column width must not become a permanent GTK allocation/minimum.
+      BOOL fillsViewport = table.numberOfColumns == 1;
+      gtk_column_view_column_set_fixed_width(native,fillsViewport ? -1 : MAX(30,ceil(column.width*peer->_scale)));
+      gtk_column_view_column_set_expand(native,fillsViewport);
+      gtk_column_view_column_set_resizable(native,TRUE);
+      gtk_column_view_column_set_visible(native,![column isHidden]);
+      gtk_column_view_append_column(GTK_COLUMN_VIEW(peer->_list),native);
+      g_object_unref(native);
+    }
+  } else {
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
   g_signal_connect(factory, "setup", G_CALLBACK(setup), peer);
   g_signal_connect(factory, "bind", G_CALLBACK(bindRow), peer);
   g_signal_connect(factory, "unbind", G_CALLBACK(unbindRow), peer);
   g_signal_connect(factory, "teardown", G_CALLBACK(teardownRow), peer);
   peer->_list = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(peer->_selection)), factory);
+  }
   gtk_widget_add_css_class(peer->_list, "navigation-sidebar");
   if ([table respondsToSelector:@selector(gtk4NativeCompactRows)] &&
       [(id<GTK4NativeAppearanceHints>)table gtk4NativeCompactRows]) {
@@ -229,7 +320,7 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   g_signal_connect(peer->_list, "activate", G_CALLBACK(nativeActivate), peer);
   peer->_scroller = gtk_scrolled_window_new();
   g_object_ref_sink(peer->_scroller);
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(peer->_scroller), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(peer->_scroller), columnView ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->_scroller), peer->_list);
   peer->_clip = GTK4NativeClipNew(peer->_scroller);
   g_object_ref_sink(peer->_clip);
@@ -305,14 +396,14 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   NSIndexSet *indexes = [_table selectedRowIndexes];
   if(GTK_IS_SINGLE_SELECTION(_selection)) {
     NSUInteger selected=indexes.firstIndex;
-    gtk_single_selection_set_selected(GTK_SINGLE_SELECTION(_selection),selected==NSNotFound?GTK_INVALID_LIST_POSITION:(guint)selected);
+    gtk_single_selection_set_selected(GTK_SINGLE_SELECTION(_selection),selected==NSNotFound || selected>=g_list_model_get_n_items(G_LIST_MODEL(_selection))?GTK_INVALID_LIST_POSITION:(guint)selected);
     _synchronizing=NO;
     return;
   }
   GtkBitset *selected = gtk_bitset_new_empty();
   for (NSUInteger index = [indexes firstIndex]; index != NSNotFound; index = [indexes indexGreaterThanIndex:index])
-    gtk_bitset_add(selected, index);
-  GtkBitset *mask = gtk_bitset_new_range(0, [_table numberOfRows]);
+    if(index<g_list_model_get_n_items(G_LIST_MODEL(_selection))) gtk_bitset_add(selected, index);
+  GtkBitset *mask = gtk_bitset_new_range(0, g_list_model_get_n_items(G_LIST_MODEL(_selection)));
   gtk_selection_model_set_selection(_selection, selected, mask);
   gtk_bitset_unref(selected); gtk_bitset_unref(mask);
   _synchronizing = NO;
@@ -324,6 +415,16 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
   }
   NSScrollView *scroll = [_table enclosingScrollView];
   _outlineDisclosureChanged=NO;
+  if (GTK_IS_COLUMN_VIEW(_list)) {
+    GListModel *columns = gtk_column_view_get_columns(GTK_COLUMN_VIEW(_list));
+    for (guint i=0; i<g_list_model_get_n_items(columns); i++) {
+      GtkColumnViewColumn *native = g_list_model_get_item(columns,i);
+      NSTableColumn *column = g_object_get_data(G_OBJECT(native),"appkit-column");
+      gtk_column_view_column_set_visible(native,![column isHidden]);
+      gtk_column_view_column_set_title(native,[[column.headerCell stringValue] UTF8String]);
+      g_object_unref(native);
+    }
+  }
   gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(_scroller),scroll.borderType!=NSNoBorder);
   if (_embedded) {
     graphene_rect_t allocated;
@@ -403,8 +504,10 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
 }
 - (void)scrollRowToVisible:(NSInteger)row
 {
-  if (_list && row >= 0 && row < [_table numberOfRows])
-    gtk_list_view_scroll_to(GTK_LIST_VIEW(_list), row, GTK_LIST_SCROLL_FOCUS, NULL);
+  if (_list && row >= 0 && row < [_table numberOfRows]) {
+    if (GTK_IS_COLUMN_VIEW(_list)) gtk_column_view_scroll_to(GTK_COLUMN_VIEW(_list),row,NULL,GTK_LIST_SCROLL_FOCUS,NULL);
+    else gtk_list_view_scroll_to(GTK_LIST_VIEW(_list), row, GTK_LIST_SCROLL_FOCUS, NULL);
+  }
 }
 - (GtkWidget *)widget { return _scroller; }
 - (GtkWidget *)embed

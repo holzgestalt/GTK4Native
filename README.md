@@ -34,10 +34,12 @@ and fallback descriptions below.
 
 > GTK4Native is now an application-linked static provider. AppKit contains no
 > GTK4Native or GNUstep appearance classes. Build with
-> `bash scripts/build-editglyphdata.sh`, or build the archive with
+> `GNUSTEP_APPLICATION_THEME=GTK4Native bash scripts/build-editglyphdata.sh`,
+> or build the archive with
 > `bash scripts/build-themes.sh GTK4Native` and link using
-> `native/application-theme.make` / `scripts/theme-config.py GTK4Native --libs`.
-> It inherits the external `native/GNUstep` provider for fallback drawing.
+> standard `application.make` with `GNUSTEP_APPLICATION_THEME=GTK4Native`
+> or `pkg-config --libs gnustep-theme-GTK4Native`.
+> It inherits the installed `Classic` provider from `libs-gui/Themes/Classic` for fallback drawing.
 > Bundle installation and AppKit-theme build instructions below are historical.
 
 # Native GTK4 widgets for GNUstep
@@ -67,8 +69,8 @@ Dependencies: GNUstep Make/Base/GUI, libobjc2 for this setup, Clang, pkg-config,
 GTK4 with its X11 development interfaces, and Xext/Shape headers. The tests
 additionally require Xvfb/xvfb-run and libXtst.so.6 for injected input.
 Tests build into the ignored `build/tests/` directory by default; override it
-with `GTK4_TEST_BUILD_DIR=/absolute/path`. Installation uses the active GNUstep
-prefix's theme directory; root access depends on that prefix's permissions.
+with `GTK4_TEST_BUILD_DIR=/absolute/path`. Installation registers static provider archives and pkg-config metadata in the
+active GNUstep prefix; root access depends on that prefix's permissions.
 The workspace prefix used here is writable without root.
 
 `bash native/GTK4Native/scripts/test-idle.sh` counts GTK frames while native
@@ -88,6 +90,13 @@ GTK list model. Surviving model items and cell widgets stay attached, including
 when their row positions shift. `bash native/GTK4Native/scripts/test-outline-update.sh`
 checks real disclosure clicks, stable surrounding rows, selection, recursive
 expansion/collapse, explicit content reloads and idle rendering.
+
+`NSColorWell` uses a live GTK color button and GTK color chooser, including
+alpha, sensitivity and AppKit target/action propagation. Unsupported color wells
+must not force an otherwise native inspector into AppKit drawing.
+`bash native/GTK4Native/scripts/test-color-well.sh` verifies native form coverage,
+color synchronization, pointer input, chooser cancellation and idle rendering
+in light, dark, 2× and fractional-scale modes.
 
 The plugin requires these local `libs-gui` commits, or equivalent changes:
 

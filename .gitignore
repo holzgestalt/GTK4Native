@@ -5,3 +5,7 @@
 # Test products
 /build/
 *.d
+
+# Python compatibility-tool caches
+__pycache__/
+*.pyc

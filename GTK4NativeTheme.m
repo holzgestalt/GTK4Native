@@ -1,5 +1,5 @@
 #import <AppKit/AppKit.h>
-#import "GSGNUstepTheme.h"
+#import <GNUstepGUI/GSClassicTheme.h>
 #import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4Renderer.h"
 #import "GTK4NativeMenu.h"
@@ -8,7 +8,7 @@
 #import "GTK4NativeTable.h"
 #import "GTK4NativeImages.h"
 
-@interface GTK4NativeTheme : GSGNUstepTheme
+@interface GTK4NativeTheme : GSClassicTheme
 {
   GTK4Renderer _renderer;
   BOOL _available;

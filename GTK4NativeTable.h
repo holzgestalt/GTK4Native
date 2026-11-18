@@ -23,6 +23,7 @@
   NSArray *_outlineItems;
   BOOL _outlineDisclosureChanged;
 }
++ (id)attachedPeerForTable:(NSTableView *)table;
 + (id)peerForTable:(NSTableView *)table;
 - (BOOL)update;
 - (void)reloadData;
