@@ -1,6 +1,7 @@
 #import "GTK4NativeView.h"
 #import "GTK4NativeCustomView.h"
 #import "GTK4NativeClip.h"
+#import "GTK4NativeImages.h"
 #import "GTK4NativeStepper.h"
 #import "GTK4NativeTable.h"
 #include <objc/runtime.h>
@@ -454,18 +455,24 @@ static void switchChanged(GObject *widget, GParamSpec *spec, gpointer bridge)
 }
 // Use ordinary GTK child widgets and symbolic icons; CSS belongs to GTK's theme.
 static void buttonContent(GtkWidget *widget, NSString *title, NSImage *image,
-  NSCellImagePosition position, NSBezelStyle bezel, CGFloat scale)
+  NSCellImagePosition position, NSBezelStyle bezel, BOOL bordered, CGFloat scale)
 {
-  NSArray *signature = @[title ?: @"", image ?: (id)[NSNull null], @(position), @(bezel), @(scale)];
+  NSArray *signature = @[title ?: @"", image ?: (id)[NSNull null], @(position), @(bezel), @(bordered), @(image.isTemplate), @(scale)];
   if ([signature isEqual:(id)g_object_get_data(G_OBJECT(widget), "appkit-content")]) return;
   g_object_set_data_full(G_OBJECT(widget), "appkit-content", [signature copy], releaseObject);
   GtkWidget *picture = NULL;
   if (image && position != NSNoImage) {
-    GdkTexture *texture = imageTexture(image);
-    if (texture) {
-      picture = gtk_image_new_from_paintable(GDK_PAINTABLE(texture));
-      gtk_image_set_pixel_size(GTK_IMAGE(picture), MAX(1,lround(20 * scale)));
-      g_object_unref(texture);
+    const char *symbol=GTK4NativeSymbolicIconForImage(image);
+    if(symbol) {
+      picture=gtk_image_new_from_icon_name(symbol);
+      gtk_image_set_pixel_size(GTK_IMAGE(picture),MAX(1,lround(16*scale)));
+    } else {
+      GdkTexture *texture = imageTexture(image);
+      if (texture) {
+        picture = gtk_image_new_from_paintable(GDK_PAINTABLE(texture));
+        gtk_image_set_pixel_size(GTK_IMAGE(picture), MAX(1,lround(20 * scale)));
+        g_object_unref(texture);
+      }
     }
   }
   if (!picture && (bezel == NSHelpButtonBezelStyle || bezel == NSDisclosureBezelStyle
@@ -488,9 +495,8 @@ static void buttonContent(GtkWidget *widget, NSString *title, NSImage *image,
   if (bezel == NSCircularBezelStyle || bezel == NSHelpButtonBezelStyle || bezel == NSRoundedDisclosureBezelStyle)
     gtk_widget_add_css_class(widget, "circular");
   else gtk_widget_remove_css_class(widget, "circular");
-  if (bezel == NSShadowlessSquareBezelStyle || bezel == NSRecessedBezelStyle || bezel == NSDisclosureBezelStyle)
-    gtk_widget_add_css_class(widget, "flat");
-  else gtk_widget_remove_css_class(widget, "flat");
+  gtk_button_set_has_frame(GTK_BUTTON(widget),bordered && bezel!=NSShadowlessSquareBezelStyle
+    && bezel!=NSRecessedBezelStyle && bezel!=NSDisclosureBezelStyle);
 }
 
 static void pathContent(GtkWidget *widget,NSPathControl *path,gpointer bridge,CGFloat scale)
@@ -505,7 +511,7 @@ static void pathContent(GtkWidget *widget,NSPathControl *path,gpointer bridge,CG
     for(NSPathComponentCell *cell in path.pathComponentCells) {
       if(index++) gtk_box_append(GTK_BOX(widget),gtk_image_new_from_icon_name("pan-end-symbolic"));
       GtkWidget *button=gtk_button_new(); gtk_widget_add_css_class(button,"flat");
-      buttonContent(button,cell.title?:@"",cell.image,NSImageLeft,NSRoundRectBezelStyle,scale);
+      buttonContent(button,cell.title?:@"",cell.image,NSImageLeft,NSRoundRectBezelStyle,NO,scale);
       gtk_widget_set_focusable(button,FALSE);
       g_object_set_data(G_OBJECT(button),"appkit-path",path);
       g_object_set_data_full(G_OBJECT(button),"appkit-path-cell",[cell retain],releaseObject);
@@ -944,7 +950,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
       : [cell showsStateBy] != NSNoCellMask ? gtk_toggle_button_new() : gtk_button_new();
     NSButton *button=(id)view;
     if(GTK_IS_CHECK_BUTTON(widget)) gtk_check_button_set_label(GTK_CHECK_BUTTON(widget),button.title.UTF8String);
-    else buttonContent(widget,button.title,button.image,button.imagePosition,button.bezelStyle,_scale);
+    else buttonContent(widget,button.title,button.image,button.imagePosition,button.bezelStyle,button.isBordered,_scale);
     g_signal_connect(widget, GTK_IS_CHECK_BUTTON(widget) ? "toggled" : "clicked", G_CALLBACK(activated), self);
   } else if (containerView(view)) {
     BOOL fillingChild=NO;
@@ -1403,7 +1409,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
             NSMenuItem *item=[popup itemAtIndex:i];
             if(item.isSeparatorItem) { gtk_box_append(GTK_BOX(menu),gtk_separator_new(GTK_ORIENTATION_HORIZONTAL)); continue; }
             GtkWidget *button=gtk_button_new(); gtk_widget_add_css_class(button,"flat");
-            buttonContent(button,item.title,item.image,NSImageLeft,NSRoundRectBezelStyle,_scale);
+            buttonContent(button,item.title,item.image,NSImageLeft,NSRoundRectBezelStyle,NO,_scale);
             gtk_widget_set_sensitive(button,item.isEnabled);
             g_object_set_data(G_OBJECT(button),"appkit-view",view);
             g_object_set_data(G_OBJECT(button),"appkit-popup-index",GUINT_TO_POINTER(i+1));
@@ -1435,7 +1441,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
         gtk_widget_set_sensitive(segment, [segments isEnabled] && [segments isEnabledForSegment:i]);
         NSString *tip = [(NSSegmentedCell *)segments.cell toolTipForSegment:i];
         gtk_widget_set_tooltip_text(segment, [tip UTF8String]);
-        buttonContent(segment, [segments labelForSegment:i], [segments imageForSegment:i], NSImageLeft, NSRoundedBezelStyle, _scale);
+        buttonContent(segment, [segments labelForSegment:i], [segments imageForSegment:i], NSImageLeft, NSRoundedBezelStyle, YES, _scale);
         CGFloat width = [segments widthForSegment:i];
         gtk_widget_set_size_request(segment, width > 0 ? lround(width*_scale) : -1, -1);
         if (GTK_IS_TOGGLE_BUTTON(segment)) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(segment), [segments isSelectedForSegment:i]);
@@ -1463,7 +1469,7 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
           if ([button alternateImage]) image = [button alternateImage];
           if ([[button alternateTitle] length]) title = [button alternateTitle];
         }
-        buttonContent(widget, title, image, [button imagePosition], [button bezelStyle], _scale);
+        buttonContent(widget, title, image, [button imagePosition], [button bezelStyle], [button isBordered], _scale);
         BOOL isDefault = [[button keyEquivalent] isEqual:@"\r"];
         if (isDefault) gtk_widget_add_css_class(widget, "suggested-action");
         else gtk_widget_remove_css_class(widget, "suggested-action");

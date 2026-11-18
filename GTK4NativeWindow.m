@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSDisplayServer.h>
 #import "GTK4NativeWindow.h"
+#import "GTK4NativeImages.h"
 #import "GTK4NativeMenu.h"
 #import "GTK4NativeTable.h"
 #import "GTK4NativeControls.h"
@@ -223,40 +224,11 @@ static GtkWidget *toolbarImage(NSImage *image, int scale, int iconSize)
 {
   // Replace standard template bitmaps with semantically equivalent GTK
   // symbolic sources. Unknown names and missing theme icons keep their artwork.
-  static const struct { NSString *name; const char *icon; } symbols[] = {
-    {@"NSAddTemplate", "list-add-symbolic"},
-    {@"NSRemoveTemplate", "list-remove-symbolic"},
-    {@"NSRefreshTemplate", "view-refresh-symbolic"},
-    {@"NSRefreshFreestandingTemplate", "view-refresh-symbolic"},
-    {@"NSStopProgressTemplate", "process-stop-symbolic"},
-    {@"NSStopProgressFreestandingTemplate", "process-stop-symbolic"},
-    {@"NSEnterFullScreenTemplate", "view-fullscreen-symbolic"},
-    {@"NSExitFullScreenTemplate", "view-restore-symbolic"},
-    {@"NSGoLeftTemplate", "go-previous-symbolic"},
-    {@"NSGoRightTemplate", "go-next-symbolic"},
-    {@"NSLeftFacingTriangleTemplate", "pan-start-symbolic"},
-    {@"NSRightFacingTriangleTemplate", "pan-end-symbolic"},
-    {@"NSIconViewTemplate", "view-grid-symbolic"},
-    {@"NSListViewTemplate", "view-list-symbolic"},
-    {@"NSLockLockedTemplate", "changes-prevent-symbolic"},
-    {@"NSLockUnlockedTemplate", "changes-allow-symbolic"},
-    {@"NSBluetoothTemplate", "bluetooth-symbolic"},
-    {@"NSTouchBarPlayTemplate", "media-playback-start-symbolic"},
-    {@"NSTouchBarRecordStopTemplate", "media-playback-stop-symbolic"},
-    {@"NSTouchBarPauseTemplate", "media-playback-pause-symbolic"},
-    {@"NSTouchBarDeleteTemplate", "user-trash-symbolic"},
-    {@"NSTouchBarSearchTemplate", "system-search-symbolic"},
-    {@"NSTouchBarSidebarTemplate", "sidebar-show-symbolic"},
-  };
-  if ([image isTemplate]) {
-    GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
-    for (NSUInteger i = 0; i < sizeof(symbols) / sizeof(symbols[0]); i++) {
-      if ([[image name] isEqual:symbols[i].name] && gtk_icon_theme_has_icon(theme, symbols[i].icon)) {
-        GtkWidget *widget = gtk_image_new_from_icon_name(symbols[i].icon);
-        gtk_image_set_pixel_size(GTK_IMAGE(widget), iconSize);
-        return widget;
-      }
-    }
+  const char *symbol=GTK4NativeSymbolicIconForImage(image);
+  if(symbol) {
+    GtkWidget *widget=gtk_image_new_from_icon_name(symbol);
+    gtk_image_set_pixel_size(GTK_IMAGE(widget),iconSize);
+    return widget;
   }
   NSSize size = [image size];
   if (size.width <= 0 || size.height <= 0) return NULL;

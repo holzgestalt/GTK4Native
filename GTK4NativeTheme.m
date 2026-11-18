@@ -6,6 +6,7 @@
 #import "GTK4NativeFilePanel.h"
 #import "GTK4NativeWindow.h"
 #import "GTK4NativeTable.h"
+#import "GTK4NativeImages.h"
 
 @interface GTK4NativeTheme : GSGNUstepTheme
 {
@@ -304,6 +305,7 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
 - (void)activate
 {
   [super activate];
+  if(_available) GTK4NativeInstallTemplateImages();
   _desktopScale=GSCurrentServer() ? [[NSScreen mainScreen] userSpaceScaleFactor] : 0;
   if (_available && !_desktopTimer) {
     _desktopTimer=[NSTimer timerWithTimeInterval:0.25 target:self

@@ -129,6 +129,12 @@ future Qt platform provider. libadwaita styling is separate from plain GTK4.
 | Boxes | Live GtkFrame/GtkBox groups with titles/content margins and GtkSeparator | Explicit source fill/stroke styling is not translated; bottom-title boxes retain fallback |
 | Dialogs | GTK native Open/Save choosers, with portal support | Foreign parent-window attachment; printing integration |
 
+Ordinary NSButtons honor `isBordered` through GTK's native frame setting.
+Standard template images share the toolbar's symbolic-icon mapping, including
+follow-link and refresh. Missing named AppKit resources are populated from GTK's
+icon assets before XIB decoding; hosted controls use live GtkImages for native
+colors and states. Custom, non-template artwork retains its image data.
+
 Hosted button/selection controls use GTK rendering, input, focus, and accessibility;
 the AppKit objects keep model state, bindings, target/action and initial layout inputs.
 Text editing and other fallback controls still use their existing AppKit

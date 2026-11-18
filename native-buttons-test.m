@@ -153,6 +153,16 @@ int main(void)
   }
   NSButton *tiny=makeButton(page,actions,@"+",NSMakeRect(950,200,24,24));
   NSButton *bottom=makeButton(page,actions,@"Bottom",NSMakeRect(20,1030,200,34));
+  NSArray *templateNames=@[@"NSFollowLinkFreestandingTemplate",@"NSRefreshTemplate"];
+  NSArray *templateSymbols=@[@"go-jump-symbolic",@"view-refresh-symbolic"];
+  NSMutableArray *templateButtons=[NSMutableArray array];
+  for(NSUInteger i=0;i<templateNames.count;i++) {
+    NSImage *art=[NSImage imageNamed:templateNames[i]];
+    CHECK(art && art.isTemplate && art.representations.count>0,@"standard template images exist before XIB decoding and retain an AppKit representation");
+    NSButton *b=makeButton(page,actions,@"",NSMakeRect(20+i*50,600,22,27));
+    [b setBordered:NO]; [b setImage:art]; [b setImagePosition:NSImageOnly];
+    [templateButtons addObject:b];
+  }
   [window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; pump(.7);
   GTK4NativeWindowDecorationView *host=(id)[[window contentView] superview];
   CHECK([host isKindOfClass:[GTK4NativeWindowDecorationView class]],@"native window host");
@@ -165,6 +175,25 @@ int main(void)
     && GTK_IS_SWITCH(nativeSwitch) && GTK_IS_BOX(nativeSegments),@"all page control families have real GTK widgets");
   CHECK(gtk_check_button_get_inconsistent(GTK_CHECK_BUTTON(nativeCheck)),@"mixed state native indicator");
   CHECK(GTK_IS_BOX(gtk_button_get_child(GTK_BUTTON([peers widgetForView:image]))),@"native image and label child widgets");
+  for(NSUInteger i=0;i<templateButtons.count;i++) {
+    NSButton *source=templateButtons[i];
+    GtkWidget *button=[peers widgetForView:source],*art=gtk_button_get_child(GTK_BUTTON(button));
+    CHECK(!gtk_button_get_has_frame(GTK_BUTTON(button)),@"borderless AppKit buttons use native flat GTK buttons");
+    CHECK(GTK_IS_IMAGE(art) && gtk_image_get_storage_type(GTK_IMAGE(art))==GTK_IMAGE_ICON_NAME
+      && !strcmp(gtk_image_get_icon_name(GTK_IMAGE(art)),[templateSymbols[i] UTF8String]),@"ordinary image buttons use GTK symbolic template icons");
+    NSInteger count=actions->count; click(button,host);
+    CHECK(actions->count==count+1 && actions->sender==source,@"borderless template buttons preserve native input and original actions");
+    [source setBordered:YES]; pump(.12);
+    CHECK([peers widgetForView:source]==button && gtk_button_get_has_frame(GTK_BUTTON(button)),@"enabling the border updates the existing native button");
+    [source setBordered:NO]; pump(.12);
+    CHECK(!gtk_button_get_has_frame(GTK_BUTTON(button)),@"disabling the border restores native flat styling");
+    [source.image setTemplate:NO]; pump(.12);
+    CHECK(gtk_image_get_storage_type(GTK_IMAGE(gtk_button_get_child(GTK_BUTTON(button))))==GTK_IMAGE_PAINTABLE,
+      @"non-template artwork keeps its image data rather than a symbolic substitute");
+    [source.image setTemplate:YES]; pump(.12);
+    CHECK(gtk_image_get_storage_type(GTK_IMAGE(gtk_button_get_child(GTK_BUTTON(button))))==GTK_IMAGE_ICON_NAME,
+      @"changing the template flag restores live symbolic rendering");
+  }
   NSInteger nativeClicks=0;
   g_signal_connect(nativePush,"clicked",G_CALLBACK(countedClick),&nativeClicks);
   NSInteger before=actions->count; click(nativePush,host);
