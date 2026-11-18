@@ -1420,7 +1420,11 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
           gtk_menu_button_set_popover(GTK_MENU_BUTTON(widget),popover);
           g_object_set_data_full(G_OBJECT(widget),"appkit-popup-items",[signature copy],releaseObject);
         }
-        gtk_menu_button_set_label(GTK_MENU_BUTTON(widget),popup.numberOfItems?[[popup itemAtIndex:0].title UTF8String]:"");
+        const char *title=popup.numberOfItems?[[popup itemAtIndex:0].title UTF8String]:"";
+        // GtkMenuButton rebuilds its label/arrow box even for an equal label.
+        // Repeating this while polling keeps CSS transitions and frames alive.
+        if(g_strcmp0(gtk_menu_button_get_label(GTK_MENU_BUTTON(widget)),title))
+          gtk_menu_button_set_label(GTK_MENU_BUTTON(widget),title);
         continue;
       }
       if (![signature isEqual:(id)g_object_get_data(G_OBJECT(widget), "appkit-popup-items")]) {
@@ -1549,7 +1553,11 @@ static void disconnectBridgeCallbacks(GtkWidget *widget, gpointer bridge)
     if(gtk_widget_get_mapped(_widget)) {
       NSValue *last=g_object_get_data(G_OBJECT(_widget),"appkit-reflected-frame");
       if(!last || NSEqualRects(last.rectValue,_view.frame)) {
-        [_view setFrameSize:NSMakeSize(gtk_widget_get_width(_widget)/_scale,gtk_widget_get_height(_widget)/_scale)];
+        NSSize size=NSMakeSize(gtk_widget_get_allocated_width(_widget)/_scale,gtk_widget_get_allocated_height(_widget)/_scale);
+        // Include GTK's border/padding, as the parent's child readback does.
+        // NSScrollView and other container overrides perform work even for
+        // equal sizes. Passive geometry readback must leave idle panes alone.
+        if(!NSEqualSizes(_view.frame.size,size)) [_view setFrameSize:size];
         rememberReflectedFrame(_view);
         g_object_set_data_full(G_OBJECT(_widget),"appkit-reflected-frame",[[NSValue valueWithRect:_view.frame] retain],releaseObject);
       }

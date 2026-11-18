@@ -71,6 +71,12 @@ with `GTK4_TEST_BUILD_DIR=/absolute/path`. Installation uses the active GNUstep
 prefix's theme directory; root access depends on that prefix's permissions.
 The workspace prefix used here is writable without root.
 
+`bash native/GTK4Native/scripts/test-idle.sh` counts GTK frames while native
+controls and a pull-down button are unchanged. Model synchronization must not
+schedule layout or rebuild button contents for equal values: that keeps GTK
+rendering continuously and wastes compositor CPU. The test also checks that
+changed titles repaint and native window resizing still allocates the content.
+
 The plugin requires these local `libs-gui` commits, or equivalent changes:
 
 - `bb3a532e9`: preserve field-editor transparency in clip views.

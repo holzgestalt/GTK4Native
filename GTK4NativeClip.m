@@ -8,6 +8,7 @@ typedef struct {
   GtkWidget parent;
   GtkWidget *child;
   GtkAllocation allocation;
+  gboolean allocationChanged;
   gboolean fill;
   gboolean measureMinimum;
   gboolean hasBackground;
@@ -123,6 +124,7 @@ void GTK4NativeClipSetChild(GtkWidget *widget, GtkWidget *child)
   if (old) gtk_widget_unparent(old);
   clip->child = child;
   if (child) gtk_widget_set_parent(child, widget);
+  clip->allocationChanged=TRUE;
   gtk_widget_queue_allocate(widget);
 }
 void GTK4NativeClipSetAllocation(GtkWidget *widget, GtkAllocation allocation)
@@ -130,18 +132,26 @@ void GTK4NativeClipSetAllocation(GtkWidget *widget, GtkAllocation allocation)
   GTK4Clip *clip = (GTK4Clip *)widget;
   if (memcmp(&clip->allocation, &allocation, sizeof(allocation))) {
     clip->allocation = allocation;
+    clip->allocationChanged=TRUE;
     gtk_widget_queue_allocate(widget);
   }
 }
 
 void GTK4NativeClipPlace(GtkWidget *widget,GtkWidget *fixed,GtkAllocation allocation)
 {
-  gtk_fixed_move(GTK_FIXED(fixed),widget,allocation.x,allocation.y);
-  gtk_widget_set_size_request(widget,allocation.width,allocation.height);
-  /* Size requests only schedule GTK's next layout phase. The AppKit child
-   * cutout is updated now, so its native replacement needs the new allocation
-   * now too. GtkFixed will retain the same geometry on its next frame. */
-  if(gtk_widget_get_visible(widget)) gtk_widget_size_allocate(widget,&allocation,-1);
+  GTK4Clip *clip=(GTK4Clip *)widget;
+  double x,y; gtk_fixed_get_child_position(GTK_FIXED(fixed),widget,&x,&y);
+  int width,height; gtk_widget_get_size_request(widget,&width,&height);
+  gboolean moved=x!=allocation.x || y!=allocation.y;
+  gboolean resized=width!=allocation.width || height!=allocation.height;
+  if(moved) gtk_fixed_move(GTK_FIXED(fixed),widget,allocation.x,allocation.y);
+  if(resized) gtk_widget_set_size_request(widget,allocation.width,allocation.height);
+  // This compatibility layer is polled for model changes. Replacing an equal
+  // GtkFixed transform still schedules layout; leave GTK idle when unchanged.
+  if((moved || resized || clip->allocationChanged) && gtk_widget_get_visible(widget)) {
+    gtk_widget_size_allocate(widget,&allocation,-1);
+    clip->allocationChanged=FALSE;
+  }
 }
 
 void GTK4NativeClipSetBackground(GtkWidget *widget,const GdkRGBA *color)
