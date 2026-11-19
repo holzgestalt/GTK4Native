@@ -194,6 +194,7 @@ static void toolbarSearchChanged(GtkSearchEntry *entry, gpointer data)
   NSString *text = [NSString stringWithUTF8String:gtk_editable_get_text(GTK_EDITABLE(entry))];
   if (![[field stringValue] isEqual:text]) {
     [field setStringValue:text];
+    [[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
     [field sendAction:[field action] to:[field target]];
   }
   [field release];

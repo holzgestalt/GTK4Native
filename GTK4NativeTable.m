@@ -349,6 +349,11 @@ static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item,
       view = [delegate outlineView:outline viewForTableColumn:column item:value];
   } else {
     value = [_table _objectValueForTableColumn:column row:row];
+    if (!value) {
+      NSDictionary *binding = [_table infoForBinding:NSContentBinding];
+      NSArray *content = [binding[NSObservedObjectKey] valueForKeyPath:binding[NSObservedKeyPathKey]];
+      if ((NSUInteger)row < content.count) value = content[row];
+    }
     if ([delegate respondsToSelector:@selector(tableView:viewForTableColumn:row:)])
       view = [delegate tableView:_table viewForTableColumn:column row:row];
   }

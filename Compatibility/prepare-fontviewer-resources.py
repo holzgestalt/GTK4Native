@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 resources = Path(sys.argv[1])
 for source in (resources / 'Base.lproj').glob('*.xib'):
     tree = ET.parse(source)
-    if source.name == 'MainWindow.xib':
+    if source.name in ('MainWindow.xib', 'MainWindow_11.xib'):
         objects = tree.getroot().find('objects')
         by_id = {element.get('id'): element for element in tree.iter() if element.get('id')}
         split = by_id['562']
@@ -26,6 +26,9 @@ for source in (resources / 'Base.lproj').glob('*.xib'):
         content.set('translatesAutoresizingMaskIntoConstraints', 'YES')
         content.remove(content.find('constraints'))
         content.find('subviews').remove(by_id['5TH-aI-4yr'])
+        if 'kI9-WX-cUE' in by_id:
+            # GTK draws the toolbar/content boundary itself.
+            content.find('subviews').remove(by_id['kI9-WX-cUE'])
         table = by_id['552']
         # The old composition fixed this list at 130 points. GtkPaned now owns
         # its width; the frame below is only the initial preferred allocation.
@@ -48,11 +51,18 @@ for source in (resources / 'Base.lproj').glob('*.xib'):
             for child in list(element):
                 if child.tag not in ('rect', 'autoresizingMask', 'connections'):
                     element.remove(child)
+        symbols = {'plus': 'NSAddTemplate', 'minus': 'NSRemoveTemplate', 'arrow.clockwise': 'NSRefreshTemplate'}
+        if element.get('image') in symbols:
+            element.set('image', symbols[element.get('image')])
+            element.attrib.pop('catalog', None)
+        if element.tag == 'image' and element.get('name') in symbols:
+            element.set('name', symbols[element.get('name')])
+            element.attrib.pop('catalog', None)
         if element.tag == 'font' and element.get('usesAppearanceFont') == 'YES':
             element.attrib.pop('usesAppearanceFont')
             element.set('metaFont', 'system')
     for connections in tree.iter('connections'):
         for outlet in list(connections):
-            if outlet.tag == 'outlet' and outlet.get('property') == 'navigationDelegate':
+            if outlet.tag == 'outlet' and outlet.get('property') in ('navigationDelegate', 'toolbarDividerRight'):
                 connections.remove(outlet)
     tree.write(resources / source.name, encoding='utf-8', xml_declaration=True)
