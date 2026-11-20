@@ -6,7 +6,8 @@ import xml.etree.ElementTree as ET
 resources = Path(sys.argv[1])
 for source in (resources / 'Base.lproj').glob('*.xib'):
     tree = ET.parse(source)
-    if source.name in ('MainWindow.xib', 'MainWindow_11.xib'):
+    ids = {element.get('id') for element in tree.iter()}
+    if source.name in ('MainWindow.xib', 'MainWindow_11.xib') and {'562', '636', '604', '552', '648'}.issubset(ids):
         objects = tree.getroot().find('objects')
         by_id = {element.get('id'): element for element in tree.iter() if element.get('id')}
         split = by_id['562']
