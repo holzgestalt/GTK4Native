@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import "GTK4NativeWindow.h"
 #import "GTK4NativeControls.h"
+#import "GTK4NativeTable.h"
 #import <GNUstepGUI/GSDisplayServer.h>
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
@@ -32,6 +33,13 @@
   count++; sender = value;
   if ([value isKindOfClass:[NSSegmentedControl class]]) segmentAtAction = [value selectedSegment];
 }
+@end
+@interface SettingsData : NSObject <NSTableViewDataSource>
+@end
+@implementation SettingsData
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)table { return 40; }
+- (id)tableView:(NSTableView *)table objectValueForTableColumn:(NSTableColumn *)column row:(NSInteger)row
+{ return [NSString stringWithFormat:@"%@ %ld",column.identifier,(long)row]; }
 @end
 static void pump(double seconds)
 {
@@ -248,6 +256,55 @@ int main(void)
   before=actions->count; click([scenePeers widgetForView:buttons[1]],sceneHost);
   CHECK(actions->count==before+1 && actions->sender==buttons[1],@"nested input remains aligned after whole scene resize");
   [scene close]; pump(.1); [scene release];
+  // Inactive NSTabView pages have no AppKit window, but their native tables
+  // must be constructed with the containing scene and survive tab switching.
+  NSWindow *settingsWindow=[[NSWindow alloc] initWithContentRect:NSMakeRect(40,40,640,400)
+    styleMask:NSTitledWindowMask|NSClosableWindowMask|NSResizableWindowMask backing:NSBackingStoreBuffered defer:NO];
+  settingsWindow.releasedWhenClosed=NO;
+  SettingsData *data=[SettingsData new];
+  NSTabView *settingsTabs=[[[NSTabView alloc] initWithFrame:NSMakeRect(0,0,640,400)] autorelease];
+  settingsTabs.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+  NSTableView *settingsTable=[[[NSTableView alloc] initWithFrame:NSMakeRect(0,0,600,330)] autorelease];
+  for(NSString *title in @[@"Setting",@"Value"]) {
+    NSTableColumn *column=[[[NSTableColumn alloc] initWithIdentifier:title] autorelease];
+    column.editable=NO; column.width=240; [column.headerCell setStringValue:title]; [settingsTable addTableColumn:column];
+  }
+  settingsTable.dataSource=data; settingsTable.target=actions; settingsTable.action=@selector(action:);
+  for(NSString *title in @[@"Overview",@"Settings"]) {
+    NSTabViewItem *item=[[[NSTabViewItem alloc] initWithIdentifier:title] autorelease]; item.label=title;
+    NSView *content=[[[NSView alloc] initWithFrame:settingsTabs.contentRect] autorelease];
+    content.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    if([title isEqual:@"Settings"]) {
+      NSScrollView *tableScroll=[[[NSScrollView alloc] initWithFrame:content.bounds] autorelease];
+      tableScroll.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+      tableScroll.hasVerticalScroller=YES; tableScroll.documentView=settingsTable; [content addSubview:tableScroll];
+    }
+    item.view=content; [settingsTabs addTabViewItem:item];
+  }
+  [settingsTable reloadData];
+  [[settingsWindow contentView] addSubview:settingsTabs];
+  CHECK(!settingsTable.window,@"inactive AppKit tab page starts detached");
+  [settingsWindow makeKeyAndOrderFront:nil]; pump(.3);
+  GTK4NativeWindowDecorationView *settingsHost=(id)[[settingsWindow contentView] superview];
+  GtkWidget *nativeSettings=[settingsHost->_nativeControls widgetForView:settingsTable];
+  CHECK(GTK_IS_COLUMN_VIEW(nativeSettings),@"initially inactive tables are native GtkColumnViews");
+  GTK4NativeTable *settingsPeer=[settingsTable valueForKey:@"_nativeTableView"];
+  CHECK([settingsPeer update],@"updating an inactive embedded table preserves its peer");
+  GtkWidget *settingsNavigation=GTK4NativeWidgetForView(settingsTabs);
+  click(findLabel(settingsNavigation,"Settings"),settingsHost);
+  CHECK(settingsTable.window==settingsWindow && GTK4NativeWidgetForView(settingsTable)==nativeSettings
+    && gtk_widget_get_mapped(nativeSettings),@"real tab input reveals the existing native table");
+  GtkWidget *settingRow=findLabel(nativeSettings,"Setting 1");
+  CHECK(settingRow,@"newly visible native table rows are populated without AppKit drawing");
+  before=actions->count; click(settingRow,settingsHost);
+  CHECK(settingsTable.selectedRow==1 && actions->count==before+1 && actions->sender==settingsTable,
+    @"table in an initially detached page accepts native selection and sends its action");
+  click(findLabel(settingsNavigation,"Overview"),settingsHost);
+  CHECK(!settingsTable.window && [settingsPeer update],@"leaving the page keeps its native model alive");
+  click(findLabel(settingsNavigation,"Settings"),settingsHost);
+  CHECK(GTK4NativeWidgetForView(settingsTable)==nativeSettings && settingsTable.selectedRow==1,
+    @"returning to a page preserves its widget and selection");
+  [settingsWindow close]; pump(.1); [settingsWindow release]; settingsTable.dataSource=nil; [data release];
   NSLog(@"PASS: GTK stack/frame, nested input, stable tab pages, delegate veto, labels, insertion/removal, orientations, margins, content replacement, fallback and teardown");
   [delegate release]; [window release]; [actions release]; XCloseDisplay(input); dlclose(xtst); [pool drain]; return 0;
 }

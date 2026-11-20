@@ -9,6 +9,7 @@
 - (NSTableRowView *)_delegateRowViewForRow:(NSInteger)row;
 @end
 @interface GTK4NativeTable (Private)
++ (id)peerForTable:(NSTableView *)table inWindow:(NSWindow *)window;
 - (NSView *)cellForRow:(NSInteger)row;
 - (void)selectionChanged:(NSNotification *)notification;
 @end
@@ -171,9 +172,13 @@ static void bindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpoint
   GTK4NativeTable *peer = data;
   GTK4NativeRow *row = g_object_get_data(G_OBJECT(item), "appkit-row");
   row->_bound = YES;
+  // Text columns are ordinary GTK labels: bind their model values immediately.
+  // They need no AppKit view construction or layout, and an idle newly shown
+  // tab may not request another frame to run the deferred custom-row path.
+  if(row->_column) populateRow(peer,row);
   // A position change can rebind an unchanged model item. Keep its existing
   // content visible; only a different item needs deferred population.
-  if(!row->_bridge || row->_representedItem!=gtk_list_item_get_item(item) || row->_generation!=peer->_generation) {
+  else if(!row->_bridge || row->_representedItem!=gtk_list_item_get_item(item) || row->_generation!=peer->_generation) {
     row->_pending=YES;
     GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
     row->_bindFrame=clock?gdk_frame_clock_get_frame_counter(clock):-1;
@@ -230,21 +235,36 @@ static void nativeActivate(GtkListView *list, guint position, gpointer data)
 static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
 { teardownRow(factory,item,((GTK4NativeColumn *)data)->_peer); }
 
+/* Inactive tab pages remain logical scene children. Ordinary detached views
+ * do not: preserving those peers would keep removed widgets hosted. */
+static BOOL sceneContainsTable(NSView *view, NSTableView *table)
+{
+  if (view == table) return YES;
+  BOOL tabPages=[view isKindOfClass:[NSTabView class]];
+  for (NSView *child in GTK4NativeChildrenForView(view))
+    if ((tabPages || child.superview==view) && sceneContainsTable(child, table)) return YES;
+  return NO;
+}
+
 @implementation GTK4NativeTable
 + (id)attachedPeerForTable:(NSTableView *)table
+{ return [self attachedPeerForTable:table inWindow:table.window]; }
++ (id)attachedPeerForTable:(NSTableView *)table inWindow:(NSWindow *)window
 {
   id peer = [table valueForKey:@"_nativeTableView"];
   if (!peer) {
-    peer = [self peerForTable:table];
+    peer = [self peerForTable:table inWindow:window];
     if (peer) [table setValue:peer forKey:@"_nativeTableView"];
   }
   return peer;
 }
 + (id)peerForTable:(NSTableView *)table
+{ return [self peerForTable:table inWindow:table.window]; }
++ (id)peerForTable:(NSTableView *)table inWindow:(NSWindow *)window
 {
   if (g_strcmp0(g_getenv("GTK4_NATIVE_TABLES"), "0") == 0 || ![table numberOfColumns]
       || ![table enclosingScrollView]) return nil;
-  NSView *decoration = [table window].contentView;
+  NSView *decoration = window.contentView;
   while ([decoration superview]) decoration = [decoration superview];
   if (![decoration isKindOfClass:[GTK4NativeWindowDecorationView class]]) return nil;
   GTK4NativeWindowDecorationView *host = (id)decoration;
@@ -261,7 +281,7 @@ static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item,
   if (!columnView) for (NSView *view in [prototypes allValues]) if (![GTK4NativeView supportsView:view]) return nil;
   GTK4NativeTable *peer = [[[self alloc] init] autorelease];
   peer->_table = table; peer->_host = host;
-  peer->_scale = [[table window] userSpaceScaleFactor] / MAX(1, gtk_widget_get_scale_factor(host->_host));
+  peer->_scale = [window userSpaceScaleFactor] / MAX(1, gtk_widget_get_scale_factor(host->_host));
   peer->_rows = [[NSHashTable weakObjectsHashTable] retain];
   peer->_model = g_list_store_new(G_TYPE_OBJECT);
   peer->_selection = [table allowsMultipleSelection]
@@ -413,8 +433,17 @@ static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item,
   gtk_bitset_unref(selected); gtk_bitset_unref(mask);
   _synchronizing = NO;
 }
+- (BOOL)preservesPeerForWindow:(NSWindow *)window
+{
+  if (!_embedded || !_host || !_table || _failed) return NO;
+  if (window) return GTK4NativeHostForWindow(window)==GTK_WINDOW(_host->_host);
+  return sceneContainsTable([[_host window] contentView], _table);
+}
 - (BOOL)update
 {
+  // NSTabView detaches inactive AppKit pages. Their GTK widgets and models
+  // still belong to the scene; a temporary nil window must not destroy them.
+  if(_table && !_table.window && [self preservesPeerForWindow:nil]) return YES;
   if (_failed || !_host || !_table || GTK4NativeHostForWindow([_table window]) != GTK_WINDOW(_host->_host)) {
     [self invalidate]; return NO;
   }
@@ -439,7 +468,7 @@ static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item,
       if (!row->_bound || !row->_box || !gtk_widget_get_mapped(row->_box)
           || gtk_widget_get_width(row->_box)<=0 || gtk_widget_get_height(row->_box)<=0) continue;
       GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
-      if(clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
+      if(!row->_column && clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
       graphene_rect_t rowRect;
       if (!gtk_widget_compute_bounds(row->_box,_scroller,&rowRect)
           || rowRect.origin.y+rowRect.size.height<=0 || rowRect.origin.y>=gtk_widget_get_height(_scroller)) continue;
@@ -493,7 +522,7 @@ static void teardownColumn(GtkSignalListItemFactory *factory, GtkListItem *item,
   for (GTK4NativeRow *row in [_rows allObjects]) {
     if (!row->_bound || !row->_box) continue;
     GdkFrameClock *clock=gtk_widget_get_frame_clock(row->_box);
-    if(clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
+    if(!row->_column && clock && gdk_frame_clock_get_frame_counter(clock)<=row->_bindFrame) continue;
     graphene_rect_t allocated;
     if (gtk_widget_get_width(row->_box) <= 0 || gtk_widget_get_height(row->_box) <= 0
         || !gtk_widget_compute_bounds(row->_box,_clip,&allocated)

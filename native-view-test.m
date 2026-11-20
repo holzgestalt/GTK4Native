@@ -57,6 +57,11 @@ int main(void)
   [NSApplication sharedApplication];
   gtk_init();
   ViewTest *test = [ViewTest new]; test.text = @"Original";
+  NSView *settingsForm=[[[NSView alloc] initWithFrame:NSMakeRect(0,0,400,100)] autorelease];
+  NSPopUpButton *theme=[[[NSPopUpButton alloc] initWithFrame:NSMakeRect(20,20,200,24) pullsDown:NO] autorelease];
+  [theme addItemWithTitle:@"Default"]; [[theme menu] addItem:[NSMenuItem separatorItem]];
+  [theme addItemWithTitle:@"Classic"]; [settingsForm addSubview:theme];
+  NSCAssert([GTK4NativeView supportsView:settingsForm],@"a Theme popup separator must not force its surrounding settings form into AppKit drawing");
   NSView *root = [[[NSView alloc] initWithFrame:NSMakeRect(0,0,460,90)] autorelease];
   NSTextField *label = [[[NSTextField alloc] initWithFrame:NSZeroRect] autorelease];
   [label setEditable:NO]; [label setStringValue:@"Glyph name"];

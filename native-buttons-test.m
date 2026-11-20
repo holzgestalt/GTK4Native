@@ -44,6 +44,14 @@ static void pump(double seconds)
     [NSApp updateWindows];
   }
 }
+static GtkWidget *visibleSeparator(GtkWidget *widget)
+{
+  if(GTK_IS_SEPARATOR(widget) && gtk_widget_get_mapped(widget)) return widget;
+  for(GtkWidget *child=gtk_widget_get_first_child(widget);child;child=gtk_widget_get_next_sibling(child)) {
+    GtkWidget *found=visibleSeparator(child); if(found) return found;
+  }
+  return NULL;
+}
 static void countedClick(GtkWidget *widget, gpointer data) { (*(NSInteger *)data)++; }
 static BOOL inViewport(GtkWidget *widget)
 {
@@ -130,6 +138,8 @@ int main(void)
   [check setButtonType:NSSwitchButton]; [check setAllowsMixedState:YES]; [check setState:NSMixedState];
   NSPopUpButton *popup=[[[NSPopUpButton alloc] initWithFrame:NSMakeRect(360,80,300,34) pullsDown:NO] autorelease];
   [popup addItemsWithTitles:@[@"First",@"Second",@"Disabled choice"]];
+  [[popup menu] addItem:[NSMenuItem separatorItem]];
+  [popup addItemWithTitle:@"After separator"];
   [[popup menu] setAutoenablesItems:NO]; [[popup itemAtIndex:2] setEnabled:NO];
   [popup setTarget:actions]; [popup setAction:@selector(action:)]; [page addSubview:popup];
   [popup bind:NSSelectedIndexBinding toObject:actions withKeyPath:@"popupIndex" options:nil];
@@ -219,8 +229,21 @@ int main(void)
     && actions->count==before,@"disabled popup row is rejected without an action");
   [actions setValue:@1 forKey:@"popupIndex"]; pump(.12);
   CHECK(gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown))==1 && actions->count==before,@"model updates popup selection silently");
+  before=actions->count;
+  gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown),3); pump(.1);
+  CHECK(popup.indexOfSelectedItem==1 && gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown))==1
+    && actions->count==before && actions->popupIndex==1,@"separator indices never change the AppKit selection or binding");
+  click(dropdown,host);
+  GtkWidget *separator=visibleSeparator(findPopover(dropdown));
+  CHECK(separator,@"popup separators are live GtkSeparators");
+  click(separator,host);
+  CHECK(popup.indexOfSelectedItem==1 && actions->count==before,@"real separator click cannot select or send an action");
+  choice=findLabel(findPopover(dropdown),"After separator");
+  CHECK(choice,@"native choice remains reachable after a separator"); click(choice,host);
+  CHECK(popup.indexOfSelectedItem==4 && actions->count==before+1 && actions->popupIndex==4,
+    @"selection after a separator preserves the original item index and binding");
   [popup addItemWithTitle:@"Added choice"]; pump(.1);
-  CHECK(g_list_model_get_n_items(gtk_drop_down_get_model(GTK_DROP_DOWN(dropdown)))==4,@"popup model updates after item insertion");
+  CHECK(g_list_model_get_n_items(gtk_drop_down_get_model(GTK_DROP_DOWN(dropdown)))==6,@"popup model updates after item insertion");
   click(nativeCheck,host); CHECK([(NSButtonCell *)check.cell state]==NSOnState,@"mixed cycles to on");
   click(nativeCheck,host); CHECK([(NSButtonCell *)check.cell state]==NSOffState,@"on cycles to off");
   click(nativeCheck,host); CHECK([(NSButtonCell *)check.cell state]==NSMixedState,@"off cycles to mixed");

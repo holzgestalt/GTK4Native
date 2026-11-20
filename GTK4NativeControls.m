@@ -86,9 +86,10 @@ static void nativeScrolled(GtkAdjustment *adjustment, gpointer peer)
     if(NSEqualPoints(lastOrigin,source.contentView.bounds.origin)) [self nativeScrolled];
   }
   NSView *document=source.documentView;
+  BOOL constrained=document.constraints.count>0;
   gtk_widget_set_size_request(bridge.widget,
-    source.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*scale)):-1,
-    source.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*scale)):-1);
+    !constrained && source.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*scale)):-1,
+    !constrained && source.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*scale)):-1);
   NSClipView *content = source.contentView;
   if (!initialized || !NSEqualPoints(lastOrigin,content.bounds.origin)) {
     GtkAdjustment *h = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scroller));
@@ -263,9 +264,10 @@ static gboolean controlScroll(GtkEventControllerScroll *controller, double dx, d
             scroll.hasVerticalScroller ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER);
           gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(peer->scroller), scroll.borderType != NSNoBorder);
           gtk_widget_add_css_class(peer->scroller, "view");
+          BOOL constrained=document.constraints.count>0;
           gtk_widget_set_size_request(peer->bridge.widget,
-            scroll.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*factor)):-1,
-            scroll.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*factor)):-1);
+            !constrained && scroll.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*factor)):-1,
+            !constrained && scroll.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*factor)):-1);
           gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(peer->scroller), peer->bridge.widget);
           peer->clip = GTK4NativeClipNew(peer->scroller); g_object_ref_sink(peer->clip);
           gtk_fixed_put(GTK_FIXED(_host->_nativeContent),peer->clip,0,0);

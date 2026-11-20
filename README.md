@@ -91,6 +91,14 @@ when their row positions shift. `bash native/GTK4Native/scripts/test-outline-upd
 checks real disclosure clicks, stable surrounding rows, selection, recursive
 expansion/collapse, explicit content reloads and idle rendering.
 
+Selection pop-ups support nonselectable `GtkSeparator` rows without forcing
+surrounding settings forms into Classic drawing. Item indices, actions and
+bindings remain those of the AppKit menu. Tables on inactive `NSTabView` pages
+use the containing native scene's window when creating their GTK peers; they
+keep their widgets and models while AppKit detaches and reattaches the pages.
+The button and container tests cover separator input and table selection across
+tab switches, including light/dark appearance and scale changes.
+
 `NSColorWell` uses a live GTK color button and GTK color chooser, including
 alpha, sensitivity and AppKit target/action propagation. Unsupported color wells
 must not force an otherwise native inspector into AppKit drawing.
@@ -99,6 +107,9 @@ color synchronization, pointer input, chooser cancellation and idle rendering
 in light, dark, 2× and fractional-scale modes.
 
 The plugin requires these local `libs-gui` commits, or equivalent changes:
+
+Inactive native table pages additionally use the toolkit-neutral
+`GSNativeTableView` optional `preservesPeerForWindow:` capability.
 
 - `bb3a532e9`: preserve field-editor transparency in clip views.
 - `d956428e8`: add text-field drawing and content-geometry theme hooks.

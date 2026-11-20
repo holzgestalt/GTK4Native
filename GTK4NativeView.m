@@ -422,6 +422,21 @@ static void compactCombo(GtkWidget *widget)
   }
   gtk_widget_add_css_class(widget,"gnustep-compact-combo");
 }
+static void compactPopup(GtkWidget *widget)
+{
+  GdkDisplay *display=gtk_widget_get_display(widget);
+  if(!g_object_get_data(G_OBJECT(display),"appkit-compact-popup-style")) {
+    GtkCssProvider *provider=gtk_css_provider_new();
+    // Retain the GTK button, arrow, border and focus styling; use compact
+    // desktop-control padding instead of GTK's taller default button minimum.
+    gtk_css_provider_load_from_data(provider,
+      "dropdown.gnustep-compact-popup > button, menubutton.gnustep-compact-popup > button {"
+      " min-height: 0; padding-top: 2px; padding-bottom: 2px; }",-1);
+    gtk_style_context_add_provider_for_display(display,GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_set_data_full(G_OBJECT(display),"appkit-compact-popup-style",provider,g_object_unref);
+  }
+  gtk_widget_add_css_class(widget,"gnustep-compact-popup");
+}
 static void compactEntry(GtkWidget *widget)
 {
   // Let GTK fit a constrained XIB slot without clipping its native border or
@@ -429,7 +444,7 @@ static void compactEntry(GtkWidget *widget)
   GdkDisplay *display=gtk_widget_get_display(widget);
   if(!g_object_get_data(G_OBJECT(display),"appkit-compact-entry-style")) {
     GtkCssProvider *provider=gtk_css_provider_new();
-    gtk_css_provider_load_from_data(provider,"entry.gnustep-compact-entry { min-height: 0; padding-top: 0; padding-bottom: 0; }",-1);
+    gtk_css_provider_load_from_data(provider,"entry.gnustep-compact-entry { min-height: 0; padding-top: 2px; padding-bottom: 2px; }",-1);
     gtk_style_context_add_provider_for_display(display,GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_set_data_full(G_OBJECT(display),"appkit-compact-entry-style",provider,g_object_unref);
   }
@@ -551,16 +566,34 @@ static void popupItemSetup(GtkSignalListItemFactory *factory, GtkListItem *item,
 {
   GtkWidget *label = gtk_label_new("");
   gtk_label_set_xalign(GTK_LABEL(label), 0);
-  gtk_list_item_set_child(item, label);
+  GtkWidget *row=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
+  gtk_box_append(GTK_BOX(row),label);
+  gtk_box_append(GTK_BOX(row),gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+  gtk_list_item_set_child(item,row);
 }
 static void popupItemBind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer unused)
 {
   NSPopUpButton *popup = g_object_get_data(G_OBJECT(factory), "appkit-popup");
   guint index = gtk_list_item_get_position(item);
   GtkStringObject *value = gtk_list_item_get_item(item);
-  BOOL enabled = index < (guint)[popup numberOfItems] && [[popup itemAtIndex:index] isEnabled];
-  GtkWidget *label = gtk_list_item_get_child(item);
+  id<NSMenuItem> menuItem=index<(guint)popup.numberOfItems?[popup itemAtIndex:index]:nil;
+  BOOL separator=menuItem.isSeparatorItem;
+  BOOL enabled=menuItem && menuItem.isEnabled && !separator;
+  GtkWidget *row=gtk_list_item_get_child(item);
+  GtkWidget *label=gtk_widget_get_first_child(row), *line=gtk_widget_get_next_sibling(label);
+  gtk_widget_set_visible(label,!separator);
+  gtk_widget_set_visible(line,separator);
   gtk_label_set_text(GTK_LABEL(label), value ? gtk_string_object_get_string(value) : "");
+  NSFont *font=popup.font;
+  CGFloat scale=[(NSNumber *)g_object_get_data(G_OBJECT(factory),"appkit-popup-scale") doubleValue];
+  PangoAttrList *attributes=pango_attr_list_new();
+  if(font) {
+    pango_attr_list_insert(attributes,pango_attr_family_new(font.familyName.UTF8String));
+    pango_attr_list_insert(attributes,pango_attr_size_new_absolute(font.pointSize*scale*PANGO_SCALE));
+    if([[NSFontManager sharedFontManager] traitsOfFont:font]&NSBoldFontMask)
+      pango_attr_list_insert(attributes,pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+  }
+  gtk_label_set_attributes(GTK_LABEL(label),attributes); pango_attr_list_unref(attributes);
   gtk_widget_set_sensitive(label, enabled);
   gtk_list_item_set_selectable(item, enabled);
   gtk_list_item_set_activatable(item, enabled);
@@ -684,8 +717,7 @@ static NSArray *structure(NSView *view)
   if (!control && !containerView(view) && !wrapped) return NO;
   if ([view isKindOfClass:[NSPopUpButton class]]) {
     for (id<NSMenuItem> item in [(NSPopUpButton *)view itemArray])
-      if ([item hasSubmenu] || (![(NSPopUpButton *)view pullsDown] && ([item isSeparatorItem]
-          || ([item image] && [item image] != [NSImage imageNamed:@"common_Nibble"])))) return NO;
+      if ([item hasSubmenu] || (![(NSPopUpButton *)view pullsDown] && ([item image] && [item image] != [NSImage imageNamed:@"common_Nibble"]))) return NO;
   }
   // Explicit context menus keep the existing menu-tracking path for now.
   if ([view isKindOfClass:[NSButton class]] && ![view isKindOfClass:[NSPopUpButton class]] && [view menu]) return NO;
@@ -865,7 +897,7 @@ static NSArray *structure(NSView *view)
   }
   else if ([view isKindOfClass:[NSScrollView class]]) {
     NSScrollView *scroll=(id)view;
-    GTK4NativeTable *table=[scroll.documentView isKindOfClass:[NSTableView class]]?[GTK4NativeTable attachedPeerForTable:(NSTableView *)scroll.documentView]:nil;
+    GTK4NativeTable *table=[scroll.documentView isKindOfClass:[NSTableView class]]?[GTK4NativeTable attachedPeerForTable:(NSTableView *)scroll.documentView inWindow:_view.window]:nil;
     if (table) {
       widget=[table embed];
       [_embeddedTables addObject:table];
@@ -1064,15 +1096,24 @@ static NSArray *structure(NSView *view)
   } else if ([view isKindOfClass:[NSPopUpButton class]]) {
     if([(NSPopUpButton *)view pullsDown]) widget=gtk_menu_button_new();
     else {
-    widget = gtk_drop_down_new(NULL, NULL);
+    // Initialize the model before GtkConstraintLayout measures the widget;
+    // an empty dropdown has a different minimum from its populated control.
+    GtkStringList *strings=gtk_string_list_new(NULL);
+    NSPopUpButton *popup=(id)view;
+    for(id<NSMenuItem> item in popup.itemArray) gtk_string_list_append(strings,(item.title?:@"").UTF8String);
+    widget = gtk_drop_down_new(G_LIST_MODEL(strings), NULL);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(widget),popup.indexOfSelectedItem>=0?(guint)popup.indexOfSelectedItem:GTK_INVALID_LIST_POSITION);
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
     g_object_set_data_full(G_OBJECT(factory), "appkit-popup", [view retain], releaseObject);
+    g_object_set_data_full(G_OBJECT(factory), "appkit-popup-scale", [@(_scale) retain], releaseObject);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(widget),factory);
     g_signal_connect(factory, "setup", G_CALLBACK(popupItemSetup), NULL);
     g_signal_connect(factory, "bind", G_CALLBACK(popupItemBind), NULL);
     gtk_drop_down_set_list_factory(GTK_DROP_DOWN(widget), factory);
     g_object_unref(factory);
     g_signal_connect(widget, "notify::selected", G_CALLBACK(dropdownChanged), self);
     }
+    compactPopup(widget);
   } else if ([view isKindOfClass:[NSSwitch class]]) {
     widget = gtk_switch_new();
     gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
@@ -1240,6 +1281,14 @@ static NSArray *structure(NSView *view)
       // Native minima and initial source preferences become GTK guides.
       if (!nativeControlSize(child) && [child contentHuggingPriorityForOrientation:sourceAxis]==250
           && [child contentCompressionResistancePriorityForOrientation:sourceAxis]==750) continue;
+      BOOL fixedDimension=NO;
+      for(NSLayoutConstraint *c in constraints)
+        if(c.firstItem==child && !c.secondItem && c.priority>=1000 && c.relation==NSLayoutRelationEqual
+            && c.firstAttribute==(axis==0?NSLayoutAttributeWidth:NSLayoutAttributeHeight)) fixedDimension=YES;
+      // A required dimension already determines this axis. A second intrinsic
+      // stay on the same axis makes GtkConstraintLayout's natural-size solve
+      // compete with its required minimum (for example a fixed caption column).
+      if(fixedDimension) continue;
       int nativeMinimum=0,natural=0; gtk_widget_measure(widget,orientation,-1,&nativeMinimum,&natural,NULL,NULL);
       GtkConstraintAttribute attr=axis==0?GTK_CONSTRAINT_ATTRIBUTE_WIDTH:GTK_CONSTRAINT_ATTRIBUTE_HEIGHT;
       CGFloat minimum=nativeMinimum;
@@ -1359,6 +1408,10 @@ static NSArray *structure(NSView *view)
   @try {
   [self synchronizePanes];
   [self reflectNativeGeometry];
+  // Embedded GTK tables do not pass through AppKit drawing. Populate newly
+  // bound visible rows here after GTK has allocated them, including a page
+  // that has just become visible, without reloading or rebuilding its model.
+  for(GTK4NativeTable *table in _embeddedTables) [table update];
   for (NSView *view in _widgets) {
     if(_invalidated) break;
     GtkWidget *widget = [self widgetForView:view];
@@ -1440,9 +1493,12 @@ static NSArray *structure(NSView *view)
       if (table) { [table update]; continue; }
       GtkWidget *nativeDocument=[self widgetForView:document];
       if (!nativeDocument) { gtk_widget_set_visible(widget,FALSE); continue; }
+      // Constrained content derives its extent from native child measurements.
+      // Reflected allocations are compatibility state, never new document minima.
+      BOOL constrained=document.constraints.count>0;
       gtk_widget_set_size_request(nativeDocument,
-        scroll.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*_scale)):-1,
-        scroll.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*_scale)):-1);
+        !constrained && scroll.hasHorizontalScroller?MAX(1,lround(NSWidth(document.frame)*_scale)):-1,
+        !constrained && scroll.hasVerticalScroller?MAX(1,lround(NSHeight(document.frame)*_scale)):-1);
       GtkAdjustment *h=gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(widget));
       GtkAdjustment *v=gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(widget));
       NSValue *last=g_object_get_data(G_OBJECT(widget),"appkit-scroll-origin");
@@ -1568,9 +1624,9 @@ static NSArray *structure(NSView *view)
       }
     } else if ([view isKindOfClass:[NSPopUpButton class]]) {
       NSPopUpButton *popup = (id)view;
-      NSMutableArray *signature = [NSMutableArray array];
+      NSMutableArray *signature = [NSMutableArray arrayWithObject:@[popup.font.fontName?:@"",@(popup.font.pointSize)]];
       for (id<NSMenuItem> item in [popup itemArray])
-        [signature addObject:@[[item title] ?: @"", @([item isEnabled])]];
+        [signature addObject:@[[item title] ?: @"", @([item isEnabled]), @([item isSeparatorItem])]];
       if(GTK_IS_MENU_BUTTON(widget)) {
         if(![signature isEqual:(id)g_object_get_data(G_OBJECT(widget),"appkit-popup-items")]) {
           GtkWidget *popover=gtk_popover_new(),*menu=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
@@ -1856,7 +1912,7 @@ static NSArray *structure(NSView *view)
       if (index == (guint)[popup indexOfSelectedItem]) return;
       if (index < (guint)[popup numberOfItems]) {
         id<NSMenuItem> item = [popup itemAtIndex:index];
-        if ([item isEnabled]) {
+        if ([item isEnabled] && ![item isSeparatorItem]) {
           [popup selectItemAtIndex:index];
           // Use the menu item's ordinary action path. NSPopUpButtonCell updates
           // selected-index/tag/value bindings before sending the popup action.
