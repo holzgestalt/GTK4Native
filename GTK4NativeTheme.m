@@ -368,14 +368,19 @@ void GTK4NativeRoundWindowCorners(GtkWidget *window, gpointer unused)
     const char *gtkNames[] = {"theme_bg_color", "theme_fg_color", "theme_base_color",
       "theme_text_color", "theme_fg_color", "theme_selected_bg_color",
       "theme_selected_fg_color", "insensitive_fg_color", "theme_bg_color",
-      "theme_base_color", "theme_selected_bg_color", "theme_base_color"};
+      "theme_base_color", "theme_selected_bg_color", "theme_base_color",
+      "accent_bg_color", "borders"};
     NSString *keys[] = {@"windowBackgroundColor", @"controlTextColor", @"textBackgroundColor",
       @"textColor", @"labelColor", @"selectedTextBackgroundColor",
       @"selectedTextColor", @"disabledControlTextColor", @"controlColor",
-      @"controlBackgroundColor", @"selectedControlColor", @"_sourceListBackgroundColor"};
+      @"controlBackgroundColor", @"selectedControlColor", @"_sourceListBackgroundColor",
+      @"controlAccentColor", @"separatorColor"};
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
       GdkRGBA color;
-      if (gtk4_renderer_color(&_renderer, gtkNames[i], &color))
+      BOOL found = gtk4_renderer_color(&_renderer, gtkNames[i], &color);
+      if (!found && [keys[i] isEqualToString:@"controlAccentColor"])
+        found = gtk4_renderer_color(&_renderer, "theme_selected_bg_color", &color);
+      if (found)
         [_nativeColors setColor:[NSColor colorWithCalibratedRed:color.red
           green:color.green blue:color.blue alpha:color.alpha] forKey:keys[i]];
     }
