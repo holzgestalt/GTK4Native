@@ -4,7 +4,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 resources = Path(sys.argv[1])
-for source in (resources / 'Base.lproj').glob('*.xib'):
+for source in list(resources.rglob('*.xib')):
     tree = ET.parse(source)
     ids = {element.get('id') for element in tree.iter()}
     if source.name in ('MainWindow.xib', 'MainWindow_11.xib') and {'562', '636', '604', '552', '648'}.issubset(ids):
@@ -66,4 +66,6 @@ for source in (resources / 'Base.lproj').glob('*.xib'):
         for outlet in list(connections):
             if outlet.tag == 'outlet' and outlet.get('property') in ('navigationDelegate', 'toolbarDividerRight'):
                 connections.remove(outlet)
-    tree.write(resources / source.name, encoding='utf-8', xml_declaration=True)
+    tree.write(source, encoding='utf-8', xml_declaration=True)
+    if source.parent.name == 'Base.lproj':
+        tree.write(resources / source.name, encoding='utf-8', xml_declaration=True)
