@@ -405,50 +405,30 @@ static void entryFont(GtkWidget *entry,NSFont *font,CGFloat scale,GtkWidget *com
   }
   if(description) pango_font_description_free(description);
 }
-static void compactCombo(GtkWidget *widget)
+static void compactInput(GtkWidget *widget, CGFloat scale)
 {
-  GdkDisplay *display=gtk_widget_get_display(widget);
-  if(!g_object_get_data(G_OBJECT(display),"appkit-compact-combo-style")) {
-    GtkCssProvider *provider=gtk_css_provider_new();
-    // Keep GTK's theme colors, borders, arrow and popup. Only remove the
-    // default 34px minimum and vertical padding from AppKit combo peers.
+  GdkDisplay *display = gtk_widget_get_display(widget);
+  if (!g_object_get_data(G_OBJECT(display), "appkit-compact-input-style")) {
+    GtkCssProvider *provider = gtk_css_provider_new();
+    // Keep GTK's borders, focus styling and arrows. Use the same vertical
+    // padding for each input, including the internal buttons and combo entry.
     gtk_css_provider_load_from_data(provider,
-      "combobox.gnustep-compact-combo { min-height: 0; }"
-      "combobox.gnustep-compact-combo > box > entry,"
-      "combobox.gnustep-compact-combo > box > button {"
-      " min-height: 0; padding-top: 0; padding-bottom: 0; }",-1);
-    gtk_style_context_add_provider_for_display(display,GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_set_data_full(G_OBJECT(display),"appkit-compact-combo-style",provider,g_object_unref);
+      ".gnustep-compact-input { min-height: 0; }"
+      "entry.gnustep-compact-input,"
+      "combobox.gnustep-compact-input > box > entry,"
+      "combobox.gnustep-compact-input > box > button,"
+      "dropdown.gnustep-compact-input > button,"
+      "menubutton.gnustep-compact-input > button {"
+      " min-height: 0; padding-top: 0; padding-bottom: 0; }", -1);
+    gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_set_data_full(G_OBJECT(display), "appkit-compact-input-style", provider, g_object_unref);
   }
-  gtk_widget_add_css_class(widget,"gnustep-compact-combo");
-}
-static void compactPopup(GtkWidget *widget)
-{
-  GdkDisplay *display=gtk_widget_get_display(widget);
-  if(!g_object_get_data(G_OBJECT(display),"appkit-compact-popup-style")) {
-    GtkCssProvider *provider=gtk_css_provider_new();
-    // Retain the GTK button, arrow, border and focus styling; use compact
-    // desktop-control padding instead of GTK's taller default button minimum.
-    gtk_css_provider_load_from_data(provider,
-      "dropdown.gnustep-compact-popup > button, menubutton.gnustep-compact-popup > button {"
-      " min-height: 0; padding-top: 2px; padding-bottom: 2px; }",-1);
-    gtk_style_context_add_provider_for_display(display,GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_set_data_full(G_OBJECT(display),"appkit-compact-popup-style",provider,g_object_unref);
-  }
-  gtk_widget_add_css_class(widget,"gnustep-compact-popup");
-}
-static void compactEntry(GtkWidget *widget)
-{
-  // Let GTK fit a constrained XIB slot without clipping its native border or
-  // text. Fonts, colors, focus indication and all rendering remain GTK's.
-  GdkDisplay *display=gtk_widget_get_display(widget);
-  if(!g_object_get_data(G_OBJECT(display),"appkit-compact-entry-style")) {
-    GtkCssProvider *provider=gtk_css_provider_new();
-    gtk_css_provider_load_from_data(provider,"entry.gnustep-compact-entry { min-height: 0; padding-top: 2px; padding-bottom: 2px; }",-1);
-    gtk_style_context_add_provider_for_display(display,GTK_STYLE_PROVIDER(provider),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-    g_object_set_data_full(G_OBJECT(display),"appkit-compact-entry-style",provider,g_object_unref);
-  }
-  gtk_widget_add_css_class(widget,"gnustep-compact-entry");
+  gtk_widget_add_css_class(widget, "gnustep-compact-input");
+  // Keep the native input compact even in a taller slot. GTK can still grow
+  // it when needed to fit larger text or a theme with thicker borders.
+  gtk_widget_set_size_request(widget, -1, lround(24 * scale));
+  gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
 }
 static BOOL radioCell(NSButtonCell *cell) { return [cell image] && [cell image] == [NSImage imageNamed:@"NSRadioButton"]; }
 static BOOL checkCell(NSButtonCell *cell)
@@ -566,6 +546,9 @@ static void popupItemSetup(GtkSignalListItemFactory *factory, GtkListItem *item,
 {
   GtkWidget *label = gtk_label_new("");
   gtk_label_set_xalign(GTK_LABEL(label), 0);
+  // The separator uses a vertical box. Let the label fill GTK's row so
+  // its vertical alignment is relative to the entire native button.
+  gtk_widget_set_vexpand(label, TRUE);
   GtkWidget *row=gtk_box_new(GTK_ORIENTATION_VERTICAL,0);
   gtk_box_append(GTK_BOX(row),label);
   gtk_box_append(GTK_BOX(row),gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
@@ -584,16 +567,6 @@ static void popupItemBind(GtkSignalListItemFactory *factory, GtkListItem *item, 
   gtk_widget_set_visible(label,!separator);
   gtk_widget_set_visible(line,separator);
   gtk_label_set_text(GTK_LABEL(label), value ? gtk_string_object_get_string(value) : "");
-  NSFont *font=popup.font;
-  CGFloat scale=[(NSNumber *)g_object_get_data(G_OBJECT(factory),"appkit-popup-scale") doubleValue];
-  PangoAttrList *attributes=pango_attr_list_new();
-  if(font) {
-    pango_attr_list_insert(attributes,pango_attr_family_new(font.familyName.UTF8String));
-    pango_attr_list_insert(attributes,pango_attr_size_new_absolute(font.pointSize*scale*PANGO_SCALE));
-    if([[NSFontManager sharedFontManager] traitsOfFont:font]&NSBoldFontMask)
-      pango_attr_list_insert(attributes,pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-  }
-  gtk_label_set_attributes(GTK_LABEL(label),attributes); pango_attr_list_unref(attributes);
   gtk_widget_set_sensitive(label, enabled);
   gtk_list_item_set_selectable(item, enabled);
   gtk_list_item_set_activatable(item, enabled);
@@ -1005,7 +978,7 @@ static NSArray *structure(NSView *view)
   else if (customView(view) || drawingLeaf(view)) widget=GTK4NativeCustomViewNew(view,_scale);
   else if ([view isKindOfClass:[NSComboBox class]]) {
     widget=gtk_combo_box_text_new_with_entry();
-    compactCombo(widget);
+    compactInput(widget,_scale);
     GtkWidget *entry=gtk_combo_box_get_child(GTK_COMBO_BOX(widget));
     entryFont(entry,[(NSComboBox *)view font],_scale,widget);
     g_object_set_data(G_OBJECT(entry),"appkit-view",view);
@@ -1058,7 +1031,7 @@ static NSArray *structure(NSView *view)
     NSTextField *field = (id)view;
     widget = [field isEditable] ? gtk_entry_new() : gtk_label_new([[field stringValue] UTF8String]);
     if ([field isEditable]) {
-      compactEntry(widget);
+      compactInput(widget,_scale);
       entryFont(widget,field.font,_scale,NULL);
       if ([field isKindOfClass:[NSSecureTextField class]]) gtk_entry_set_visibility(GTK_ENTRY(widget),FALSE);
       g_signal_connect(widget, "changed", G_CALLBACK(entryChanged), self);
@@ -1105,7 +1078,6 @@ static NSArray *structure(NSView *view)
     gtk_drop_down_set_selected(GTK_DROP_DOWN(widget),popup.indexOfSelectedItem>=0?(guint)popup.indexOfSelectedItem:GTK_INVALID_LIST_POSITION);
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
     g_object_set_data_full(G_OBJECT(factory), "appkit-popup", [view retain], releaseObject);
-    g_object_set_data_full(G_OBJECT(factory), "appkit-popup-scale", [@(_scale) retain], releaseObject);
     gtk_drop_down_set_factory(GTK_DROP_DOWN(widget),factory);
     g_signal_connect(factory, "setup", G_CALLBACK(popupItemSetup), NULL);
     g_signal_connect(factory, "bind", G_CALLBACK(popupItemBind), NULL);
@@ -1113,7 +1085,7 @@ static NSArray *structure(NSView *view)
     g_object_unref(factory);
     g_signal_connect(widget, "notify::selected", G_CALLBACK(dropdownChanged), self);
     }
-    compactPopup(widget);
+    compactInput(widget,_scale);
   } else if ([view isKindOfClass:[NSSwitch class]]) {
     widget = gtk_switch_new();
     gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
@@ -1624,7 +1596,7 @@ static NSArray *structure(NSView *view)
       }
     } else if ([view isKindOfClass:[NSPopUpButton class]]) {
       NSPopUpButton *popup = (id)view;
-      NSMutableArray *signature = [NSMutableArray arrayWithObject:@[popup.font.fontName?:@"",@(popup.font.pointSize)]];
+      NSMutableArray *signature = [NSMutableArray array];
       for (id<NSMenuItem> item in [popup itemArray])
         [signature addObject:@[[item title] ?: @"", @([item isEnabled]), @([item isSeparatorItem])]];
       if(GTK_IS_MENU_BUTTON(widget)) {
