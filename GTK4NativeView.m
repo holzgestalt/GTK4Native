@@ -237,6 +237,17 @@ static BOOL layoutContainer(NSView *view) { return containerView(view) || custom
 // widget has the same themed minimum-size requirements as other controls.
 static BOOL nativeControlSize(NSView *view)
 { return [view isKindOfClass:[NSControl class]] || [view isKindOfClass:[NSProgressIndicator class]]; }
+BOOL GTK4NativeIsStandardTableCell(NSView *view)
+{
+  if (![view isKindOfClass:[NSTableCellView class]]) return NO;
+  NSTableCellView *cell = (NSTableCellView *)view;
+  return cell.constraints.count == 0 && cell.textField.constraints.count == 0
+    && cell.imageView.constraints.count == 0
+    && cell.textField && !cell.textField.isEditable
+    && cell.textField.superview == cell
+    && (!cell.imageView || cell.imageView.superview == cell)
+    && cell.subviews.count == (cell.imageView ? 2 : 1);
+}
 static BOOL drawingLeaf(NSView *view)
 { return [view isKindOfClass:[NSTextView class]] || [view isKindOfClass:[NSTableView class]] || [view isKindOfClass:[NSRulerView class]]; }
 static void splitPositionChanged(GObject *paned,GParamSpec *spec,gpointer bridge)
@@ -1301,6 +1312,8 @@ static NSArray *structure(NSView *view)
         guide,attr,1,0,GTK_CONSTRAINT_STRENGTH_REQUIRED));
     }
     if (child.translatesAutoresizingMaskIntoConstraints) {
+      BOOL centerIcon = GTK4NativeIsStandardTableCell(view) && child == [(NSTableCellView *)view imageView]
+        && !(child.autoresizingMask & NSViewHeightSizable);
       NSArray *input=layoutInput(child);
       NSRect rect = [input[0] rectValue];
       NSSize initialParentSize=[input[1] sizeValue];
@@ -1323,6 +1336,11 @@ static NSArray *structure(NSView *view)
           size=MAX(size,minimum/_scale);
         }
         for(int i=0;i<2;i++) {
+          if (centerIcon && axis == 1 && i == 0) {
+            gtk_constraint_layout_add_constraint(layout,gtk_constraint_new(widget,GTK_CONSTRAINT_ATTRIBUTE_CENTER_Y,
+              GTK_CONSTRAINT_RELATION_EQ,NULL,GTK_CONSTRAINT_ATTRIBUTE_CENTER_Y,1,0,GTK_CONSTRAINT_STRENGTH_REQUIRED));
+            continue;
+          }
           CGFloat weight=flex[axis][i] ? (total>0?lengths[i]/total:1.0/MAX(1,count)) : 0;
           // An unchanged frame in an unflipped source view is bottom anchored.
           if(axis==1 && i==0 && !view.isFlipped && count==0) weight=1;

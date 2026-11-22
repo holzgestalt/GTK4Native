@@ -19,6 +19,7 @@
 /* Logical children include inactive tab pages, which AppKit detaches. */
 NSArray *GTK4NativeChildrenForView(NSView *view);
 NSArray *GTK4NativeStructureForView(NSView *view);
+BOOL GTK4NativeIsStandardTableCell(NSView *view);
 
 @interface GTK4NativeView : NSObject <GSNativeViewPeer>
 {

@@ -44,6 +44,14 @@
 - (void)dealloc { [_column release]; [super dealloc]; }
 @end
 static void releaseRow(gpointer data) { [(id)data release]; }
+static int nativeRowHeight(GTK4NativeTable *peer, NSInteger row)
+{
+  CGFloat height = [peer->_table _rowHeightForRow:row] * peer->_scale;
+  // Standard rows budget for the GTK row's two pixels of padding on each
+  // edge. A taller explicit height remains available to the application.
+  if (peer->_standardRows) height = MAX(24 * peer->_scale, height) - 4;
+  return MAX(1, ceil(height));
+}
 static void groupToggled(GtkButton *button, gpointer data)
 {
   GTK4NativeRow *row = data;
@@ -161,8 +169,7 @@ static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
   }
   [row->_bridge synchronize];
   g_set_object(&row->_representedItem,gtk_list_item_get_item(item));
-  gtk_widget_set_size_request([row->_bridge widget], -1,
-    MAX(1, ceil([peer->_table _rowHeightForRow:index] * peer->_scale)));
+  gtk_widget_set_size_request([row->_bridge widget], -1, nativeRowHeight(peer,index));
   gtk_widget_set_margin_start(row->_box, 4);
   gtk_widget_set_margin_end(row->_box, 4);
   updateOutlineRow(peer,row);
@@ -186,7 +193,7 @@ static void bindRow(GtkSignalListItemFactory *factory, GtkListItem *item, gpoint
   }
   guint position = gtk_list_item_get_position(item);
   gtk_widget_set_size_request(row->_box,-1, position < [peer->_table numberOfRows]
-    ? MAX(1,ceil([peer->_table _rowHeightForRow:position] * peer->_scale)) : 1);
+    ? nativeRowHeight(peer,position) : 1);
 }
 static void bindColumn(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer data)
 { bindRow(factory,item,((GTK4NativeColumn *)data)->_peer); }
@@ -281,6 +288,10 @@ static BOOL sceneContainsTable(NSView *view, NSTableView *table)
   if (!columnView) for (NSView *view in [prototypes allValues]) if (![GTK4NativeView supportsView:view]) return nil;
   GTK4NativeTable *peer = [[[self alloc] init] autorelease];
   peer->_table = table; peer->_host = host;
+  peer->_standardRows = YES;
+  if (!columnView)
+    for (NSView *prototype in prototypes.allValues)
+      if (!GTK4NativeIsStandardTableCell(prototype)) peer->_standardRows = NO;
   peer->_scale = [window userSpaceScaleFactor] / MAX(1, gtk_widget_get_scale_factor(host->_host));
   peer->_rows = [[NSHashTable weakObjectsHashTable] retain];
   peer->_model = g_list_store_new(G_TYPE_OBJECT);
@@ -324,13 +335,15 @@ static BOOL sceneContainsTable(NSView *view, NSTableView *table)
   peer->_list = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(peer->_selection)), factory);
   }
   gtk_widget_add_css_class(peer->_list, "navigation-sidebar");
-  if ([table respondsToSelector:@selector(gtk4NativeCompactRows)] &&
-      [(id<GTK4NativeAppearanceHints>)table gtk4NativeCompactRows]) {
+  if (peer->_standardRows || ([table respondsToSelector:@selector(gtk4NativeCompactRows)] &&
+      [(id<GTK4NativeAppearanceHints>)table gtk4NativeCompactRows])) {
     GdkDisplay *display = gdk_display_get_default();
     if (!g_object_get_data(G_OBJECT(display), "appkit-compact-list-style")) {
       GtkCssProvider *provider = gtk_css_provider_new();
       gtk_css_provider_load_from_data(provider,
-        "listview.gnustep-compact-list > row { min-height: 0; padding: 2px 4px; }", -1);
+        "listview.gnustep-compact-list > row,"
+        "columnview.gnustep-compact-list > listview > row { min-height: 0; padding: 2px 4px; }"
+        "columnview.gnustep-compact-list > listview > row > cell { min-height: 0; padding: 0 4px; }", -1);
       gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
       g_object_set_data_full(G_OBJECT(display), "appkit-compact-list-style", provider, g_object_unref);
     }

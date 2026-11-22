@@ -18,6 +18,7 @@
   BOOL _synchronizing;
   BOOL _failed;
   BOOL _embedded;
+  BOOL _standardRows;
   CGFloat _scale;
   NSUInteger _generation;
   NSArray *_outlineItems;
