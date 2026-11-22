@@ -405,7 +405,7 @@ static void entryFont(GtkWidget *entry,NSFont *font,CGFloat scale,GtkWidget *com
   }
   if(description) pango_font_description_free(description);
 }
-static void compactInput(GtkWidget *widget, CGFloat scale)
+static void compactControl(GtkWidget *widget, CGFloat scale, int height)
 {
   GdkDisplay *display = gtk_widget_get_display(widget);
   if (!g_object_get_data(G_OBJECT(display), "appkit-compact-input-style")) {
@@ -414,6 +414,8 @@ static void compactInput(GtkWidget *widget, CGFloat scale)
     // padding for each input, including the internal buttons and combo entry.
     gtk_css_provider_load_from_data(provider,
       ".gnustep-compact-input { min-height: 0; }"
+      "button.gnustep-compact-input { padding-left: 8px; padding-right: 8px; }"
+      "button.gnustep-compact-input,"
       "entry.gnustep-compact-input,"
       "combobox.gnustep-compact-input > box > entry,"
       "combobox.gnustep-compact-input > box > button,"
@@ -425,9 +427,9 @@ static void compactInput(GtkWidget *widget, CGFloat scale)
     g_object_set_data_full(G_OBJECT(display), "appkit-compact-input-style", provider, g_object_unref);
   }
   gtk_widget_add_css_class(widget, "gnustep-compact-input");
-  // Keep the native input compact even in a taller slot. GTK can still grow
+  // Keep the native control compact even in a taller slot. GTK can still grow
   // it when needed to fit larger text or a theme with thicker borders.
-  gtk_widget_set_size_request(widget, -1, lround(24 * scale));
+  gtk_widget_set_size_request(widget, -1, lround(height * scale));
   gtk_widget_set_valign(widget, GTK_ALIGN_CENTER);
 }
 static BOOL radioCell(NSButtonCell *cell) { return [cell image] && [cell image] == [NSImage imageNamed:@"NSRadioButton"]; }
@@ -978,7 +980,7 @@ static NSArray *structure(NSView *view)
   else if (customView(view) || drawingLeaf(view)) widget=GTK4NativeCustomViewNew(view,_scale);
   else if ([view isKindOfClass:[NSComboBox class]]) {
     widget=gtk_combo_box_text_new_with_entry();
-    compactInput(widget,_scale);
+    compactControl(widget,_scale,24);
     GtkWidget *entry=gtk_combo_box_get_child(GTK_COMBO_BOX(widget));
     entryFont(entry,[(NSComboBox *)view font],_scale,widget);
     g_object_set_data(G_OBJECT(entry),"appkit-view",view);
@@ -1031,7 +1033,7 @@ static NSArray *structure(NSView *view)
     NSTextField *field = (id)view;
     widget = [field isEditable] ? gtk_entry_new() : gtk_label_new([[field stringValue] UTF8String]);
     if ([field isEditable]) {
-      compactInput(widget,_scale);
+      compactControl(widget,_scale,24);
       entryFont(widget,field.font,_scale,NULL);
       if ([field isKindOfClass:[NSSecureTextField class]]) gtk_entry_set_visibility(GTK_ENTRY(widget),FALSE);
       g_signal_connect(widget, "changed", G_CALLBACK(entryChanged), self);
@@ -1085,7 +1087,7 @@ static NSArray *structure(NSView *view)
     g_object_unref(factory);
     g_signal_connect(widget, "notify::selected", G_CALLBACK(dropdownChanged), self);
     }
-    compactInput(widget,_scale);
+    compactControl(widget,_scale,24);
   } else if ([view isKindOfClass:[NSSwitch class]]) {
     widget = gtk_switch_new();
     gtk_widget_set_halign(widget, GTK_ALIGN_CENTER);
@@ -1130,7 +1132,10 @@ static NSArray *structure(NSView *view)
       : [cell showsStateBy] != NSNoCellMask ? gtk_toggle_button_new() : gtk_button_new();
     NSButton *button=(id)view;
     if(GTK_IS_CHECK_BUTTON(widget)) gtk_check_button_set_label(GTK_CHECK_BUTTON(widget),button.title.UTF8String);
-    else buttonContent(widget,button.title,button.image,button.imagePosition,button.bezelStyle,button.isBordered,_scale);
+    else {
+      buttonContent(widget,button.title,button.image,button.imagePosition,button.bezelStyle,button.isBordered,_scale);
+      if (!gtk_widget_has_css_class(widget,"circular")) compactControl(widget,_scale,28);
+    }
     g_signal_connect(widget, GTK_IS_CHECK_BUTTON(widget) ? "toggled" : "clicked", G_CALLBACK(activated), self);
   } else if (containerView(view)) {
     BOOL fillingChild=NO;
