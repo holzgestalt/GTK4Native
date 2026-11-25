@@ -3,6 +3,10 @@
 #include <stdint.h>
 #ifdef __OBJC__
 #import <Cocoa/Cocoa.h>
+#define NSRectEdgeMinX NSMinXEdge
+#define NSRectEdgeMinY NSMinYEdge
+#define NSRectEdgeMaxX NSMaxXEdge
+#define NSRectEdgeMaxY NSMaxYEdge
 #include <endian.h>
 #define CFSwapInt16BigToHost be16toh
 #define CFSwapInt16HostToBig htobe16
