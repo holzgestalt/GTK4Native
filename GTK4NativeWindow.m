@@ -400,10 +400,14 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
 - (BOOL)canHostToolbar
 {
   if (!hasToolbar) return NO;
-  for (NSToolbarItem *item in [[window toolbar] items])
-    if ([item view] && ![[item view] isKindOfClass:[NSSearchField class]]
-        && ![[item view] isKindOfClass:[NSButton class]]
-        && ![[item view] isKindOfClass:[NSSegmentedControl class]]) return NO;
+  for (NSToolbarItem *item in [[window toolbar] items]) {
+    NSView *view = [item view];
+    if ([view isKindOfClass:[NSPopUpButton class]]) {
+      if (![GTK4NativeView supportsView:view]) return NO;
+    } else if (view && ![view isKindOfClass:[NSSearchField class]]
+               && ![view isKindOfClass:[NSButton class]]
+               && ![view isKindOfClass:[NSSegmentedControl class]]) return NO;
+  }
   return YES;
 }
 - (void)updateNativeToolbar
@@ -431,10 +435,12 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
       if (native) gtk_widget_remove_css_class(_header, "default-decoration");
       else gtk_widget_add_css_class(_header, "default-decoration");
       [_toolbarSignature release]; _toolbarSignature = [signature copy];
+      for (GTK4NativeView *bridge in _toolbarSelectionBridges) [bridge invalidate];
+      [_toolbarSelectionBridges removeAllObjects];
       if (_nativeToolbar) {
         gtk_header_bar_remove(GTK_HEADER_BAR(_header), _nativeToolbar);
         gtk_header_bar_remove(GTK_HEADER_BAR(_header), _nativeToolbarSearch);
-        _nativeToolbar = _nativeToolbarItems = _nativeToolbarSearch = _toolbarOverflow = NULL;
+        _nativeToolbar = _nativeToolbarItems = _nativeToolbarSearch = _nativeToolbarSelections = _toolbarOverflow = NULL;
       }
       if (native) {
         int iconSize = nativeToolbarIconSize();
@@ -449,10 +455,18 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
         gtk_widget_set_tooltip_text(_nativeToolbar, [[window title] UTF8String]);
         _nativeToolbarItems = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
         _nativeToolbarSearch = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        BOOL pinLeadingActions = NO;
+        for (NSToolbarItem *item in [toolbar items])
+          if ([[item view] isKindOfClass:[NSPopUpButton class]]) { pinLeadingActions = YES; break; }
         GtkWidget *scroller = gtk_scrolled_window_new();
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
         gtk_widget_set_hexpand(scroller, TRUE);
         gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), _nativeToolbarItems);
+        // Keep selection controls and their leading actions outside overflow.
+        if (pinLeadingActions) {
+          _nativeToolbarSelections = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+          gtk_box_append(GTK_BOX(_nativeToolbar), _nativeToolbarSelections);
+        }
         gtk_box_append(GTK_BOX(_nativeToolbar), scroller);
         _toolbarOverflow = gtk_menu_button_new();
         gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(_toolbarOverflow), "view-more-symbolic");
@@ -473,6 +487,17 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
                      || [identifier isEqual:@"NSToolbarSidebarTrackingSeparatorItemIdentifier"]
                      || (![item view] && ![item image] && ![item action])) {
             widget = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+          } else if ([[item view] isKindOfClass:[NSPopUpButton class]]) {
+            pinLeadingActions = NO;
+            CGFloat scale = [window userSpaceScaleFactor] / MAX(1,gtk_widget_get_scale_factor(_host));
+            GTK4NativeView *bridge = [[GTK4NativeView alloc] initWithView:[item view] scale:scale];
+            if (!bridge) continue;
+            if (!_toolbarSelectionBridges) _toolbarSelectionBridges = [NSMutableArray new];
+            [_toolbarSelectionBridges addObject:bridge];
+            widget = [bridge widget];
+            [bridge release];
+            gtk_box_append(GTK_BOX(_nativeToolbarSelections), widget);
+            continue;
           } else if ([[item view] isKindOfClass:[NSSegmentedControl class]]) {
             NSSegmentedControl *control = (id)[item view];
             widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -516,8 +541,10 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
           }
           g_object_set_data_full(G_OBJECT(widget), "appkit-toolbar-item", [item retain], toolbarItemReleased);
           gtk_widget_set_tooltip_text(widget, [([item toolTip] ?: [item label]) UTF8String]);
-          gtk_box_append(GTK_BOX(GTK_IS_SEARCH_ENTRY(widget) ? _nativeToolbarSearch : _nativeToolbarItems), widget);
-          if (GTK_IS_BUTTON(widget)) {
+          GtkWidget *group = GTK_IS_SEARCH_ENTRY(widget) ? _nativeToolbarSearch
+            : pinLeadingActions ? _nativeToolbarSelections : _nativeToolbarItems;
+          gtk_box_append(GTK_BOX(group), widget);
+          if (group == _nativeToolbarItems && GTK_IS_BUTTON(widget)) {
             GtkWidget *overflowItem = gtk_button_new_with_label([[item label] UTF8String]);
             gtk_widget_add_css_class(overflowItem, "flat");
             g_object_set_data_full(G_OBJECT(overflowItem), "appkit-toolbar-item", [item retain], toolbarItemReleased);
@@ -547,6 +574,7 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
       for (NSToolbarItem *item in [toolbar items])
         if ([item autovalidates] && [item action]) [item validate];
     }
+    for (GTK4NativeView *bridge in _toolbarSelectionBridges) [bridge synchronize];
     if (_nativeToolbar) {
       int minimum, natural;
       gtk_widget_measure(_nativeToolbarItems, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, NULL, NULL);
@@ -563,8 +591,8 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
         gtk_widget_set_sensitive(widget, [item isEnabled]);
       }
     }
-    GtkWidget *itemBoxes[] = {_nativeToolbarItems, _nativeToolbarSearch};
-    for (int box = 0; box < 2; box++) {
+    GtkWidget *itemBoxes[] = {_nativeToolbarItems, _nativeToolbarSearch, _nativeToolbarSelections};
+    for (int box = 0; box < G_N_ELEMENTS(itemBoxes); box++) {
     if (itemBoxes[box]) for (GtkWidget *widget = gtk_widget_get_first_child(itemBoxes[box]); widget; widget = gtk_widget_get_next_sibling(widget)) {
       NSToolbarItem *item = g_object_get_data(G_OBJECT(widget), "appkit-toolbar-item");
       if ([item action] || [item view]) gtk_widget_set_sensitive(widget, [item isEnabled]);
@@ -951,6 +979,8 @@ static gboolean controlDefaultKey(GtkEventControllerKey *controller, guint keyva
   [_nativeControls release];
   [_hostTimer invalidate];
   [_toolbarSignature release];
+  for (GTK4NativeView *bridge in _toolbarSelectionBridges) [bridge invalidate];
+  [_toolbarSelectionBridges release];
   if (_host) {
     gtk_window_destroy(GTK_WINDOW(_host));
     g_object_unref(_host);
