@@ -52,6 +52,17 @@ static int nativeRowHeight(GTK4NativeTable *peer, NSInteger row)
   if (peer->_standardRows) height = MAX(24 * peer->_scale, height) - 4;
   return MAX(1, ceil(height));
 }
+static int constrainedRowHeight(NSView *cell, CGFloat scale)
+{
+  CGFloat minimum = 0;
+  for (NSView *view in [@[cell] arrayByAddingObjectsFromArray:cell.subviews])
+    for (NSLayoutConstraint *constraint in view.constraints)
+      if (constraint.firstAttribute == NSLayoutAttributeHeight && !constraint.secondItem
+          && constraint.priority >= NSLayoutPriorityRequired
+          && constraint.relation != NSLayoutRelationLessThanOrEqual)
+        minimum = MAX(minimum, constraint.constant);
+  return ceil(minimum * scale);
+}
 static void groupToggled(GtkButton *button, gpointer data)
 {
   GTK4NativeRow *row = data;
@@ -169,7 +180,9 @@ static void populateRow(GTK4NativeTable *peer, GTK4NativeRow *row)
   }
   [row->_bridge synchronize];
   g_set_object(&row->_representedItem,gtk_list_item_get_item(item));
-  gtk_widget_set_size_request([row->_bridge widget], -1, nativeRowHeight(peer,index));
+  int height = nativeRowHeight(peer,index);
+  if (peer->_standardRows) height = MAX(height, constrainedRowHeight(row->_bridge.view,peer->_scale));
+  gtk_widget_set_size_request([row->_bridge widget], -1, height);
   gtk_widget_set_margin_start(row->_box, 4);
   gtk_widget_set_margin_end(row->_box, 4);
   updateOutlineRow(peer,row);
