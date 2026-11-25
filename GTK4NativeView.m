@@ -237,16 +237,14 @@ static BOOL layoutContainer(NSView *view) { return containerView(view) || custom
 // widget has the same themed minimum-size requirements as other controls.
 static BOOL nativeControlSize(NSView *view)
 { return [view isKindOfClass:[NSControl class]] || [view isKindOfClass:[NSProgressIndicator class]]; }
+
 BOOL GTK4NativeIsStandardTableCell(NSView *view)
 {
   if (![view isKindOfClass:[NSTableCellView class]]) return NO;
   NSTableCellView *cell = (NSTableCellView *)view;
-  return cell.constraints.count == 0 && cell.textField.constraints.count == 0
-    && cell.imageView.constraints.count == 0
-    && cell.textField && !cell.textField.isEditable
-    && cell.textField.superview == cell
-    && (!cell.imageView || cell.imageView.superview == cell)
-    && cell.subviews.count == (cell.imageView ? 2 : 1);
+	return cell.textField && !cell.textField.isEditable && cell.textField.superview == cell
+		&& (!cell.imageView || cell.imageView.superview == cell)
+		&& cell.subviews.count == (cell.imageView ? 2 : 1);
 }
 static BOOL drawingLeaf(NSView *view)
 { return [view isKindOfClass:[NSTextView class]] || [view isKindOfClass:[NSTableView class]] || [view isKindOfClass:[NSRulerView class]]; }
@@ -1056,6 +1054,7 @@ static NSArray *structure(NSView *view)
       gtk_label_set_xalign(GTK_LABEL(widget), [field alignment] == NSRightTextAlignment ? 1
         : [field alignment] == NSCenterTextAlignment ? .5 : 0);
       gtk_label_set_ellipsize(GTK_LABEL(widget), PANGO_ELLIPSIZE_END);
+		gtk_label_set_single_line_mode(GTK_LABEL(widget), [[field cell] usesSingleLineMode]);
       gtk_label_set_selectable(GTK_LABEL(widget), [field isSelectable]);
       PangoAttrList *attrs = pango_attr_list_new();
       NSFont *font = [field font];
@@ -1244,6 +1243,10 @@ static NSArray *structure(NSView *view)
   gtk_constraint_layout_add_constraint(layout,gtk_constraint_new_constant(NULL,GTK_CONSTRAINT_ATTRIBUTE_TOP,
     GTK_CONSTRAINT_RELATION_EQ,0,GTK_CONSTRAINT_STRENGTH_REQUIRED));
   NSMutableArray *constraints = [NSMutableArray arrayWithArray:view.constraints];
+	/* Only rows laid out with frames need the legacy icon alignment fallback. */
+	NSTableCellView *tableCell = GTK4NativeIsStandardTableCell(view) ? (NSTableCellView *)view : nil;
+	NSImageView *frameBasedIcon = !tableCell.constraints.count && !tableCell.textField.constraints.count
+		&& !tableCell.imageView.constraints.count ? tableCell.imageView : nil;
   for (NSView *child in view.subviews) {
     GtkWidget *widget = [self widgetForView:child];
     NSArray *input=layoutInput(child);
@@ -1312,7 +1315,7 @@ static NSArray *structure(NSView *view)
         guide,attr,1,0,GTK_CONSTRAINT_STRENGTH_REQUIRED));
     }
     if (child.translatesAutoresizingMaskIntoConstraints) {
-      BOOL centerIcon = GTK4NativeIsStandardTableCell(view) && child == [(NSTableCellView *)view imageView]
+      BOOL centerIcon = child == frameBasedIcon
         && !(child.autoresizingMask & NSViewHeightSizable);
       NSArray *input=layoutInput(child);
       NSRect rect = [input[0] rectValue];

@@ -11,10 +11,23 @@ static NSTableCellView *cell(void)
 {
   NSTableCellView *view=[[[NSTableCellView alloc] initWithFrame:NSMakeRect(0,0,260,24)] autorelease];
   view.identifier=@"Row";
-  NSTextField *label=[[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,24)] autorelease];
+  NSTextField *label=[[[NSTextField alloc] initWithFrame:NSMakeRect(22,0,236,24)] autorelease];
   label.editable=NO; label.bezeled=NO; label.drawsBackground=NO;
-  label.autoresizingMask=NSViewWidthSizable;
+  NSImageView *icon=[[[NSImageView alloc] initWithFrame:NSMakeRect(2,4,16,16)] autorelease];
+	[label.cell setUsesSingleLineMode:YES];
+	label.translatesAutoresizingMaskIntoConstraints=NO;
+	icon.translatesAutoresizingMaskIntoConstraints=NO;
+	[view addSubview:icon]; view.imageView=icon;
   [view addSubview:label]; view.textField=label;
+	[view addConstraints:@[
+		[icon.leadingAnchor constraintEqualToAnchor:view.leadingAnchor constant:2],
+		[icon.centerYAnchor constraintEqualToAnchor:view.centerYAnchor],
+		[icon.widthAnchor constraintEqualToConstant:16],
+		[icon.heightAnchor constraintEqualToConstant:16],
+		[label.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:6],
+		[label.trailingAnchor constraintEqualToAnchor:view.trailingAnchor constant:-2],
+		[label.centerYAnchor constraintEqualToAnchor:icon.centerYAnchor]
+	]];
   [label bind:NSValueBinding toObject:view withKeyPath:@"objectValue" options:nil];
   return view;
 }
@@ -104,6 +117,16 @@ int main(void)
     NSCAssert(peer && peer->_embedded,@"outline has a native embedded model");
     GtkWidget *before=labelFor(peer->_list,"Before"),*after=labelFor(peer->_list,"After A");
     NSCAssert(before && after,@"surrounding native rows are populated");
+	NSCAssert(gtk_widget_has_css_class(peer->_list,"gnustep-compact-list"),@"centered rows keep compact sizing");
+	GtkWidget *rowContent=gtk_widget_get_parent(before);
+	GtkWidget *icon=gtk_widget_get_first_child(rowContent);
+	graphene_rect_t iconBounds,labelBounds;
+	NSCAssert(GTK_IS_PICTURE(icon) && gtk_label_get_single_line_mode(GTK_LABEL(before))
+		&& gtk_widget_compute_bounds(icon,rowContent,&iconBounds)
+		&& gtk_widget_compute_bounds(before,rowContent,&labelBounds),@"the row uses native single-line text and an icon");
+	NSCAssert(fabs(graphene_rect_get_y(&iconBounds)+graphene_rect_get_height(&iconBounds)/2
+		- graphene_rect_get_y(&labelBounds)-graphene_rect_get_height(&labelBounds)/2) <= 1,
+		@"the explicit constraints center the icon and label");
     g_object_ref(before); g_object_ref(after);
     NSUInteger unmaps=0;
     gulong unmapSignals[]={g_signal_connect(before,"unmap",G_CALLBACK(unmapped),&unmaps),
